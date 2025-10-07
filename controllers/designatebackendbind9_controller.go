@@ -18,6 +18,7 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -289,6 +290,7 @@ func (r *DesignateBackendbind9Reconciler) SetupWithManager(ctx context.Context, 
 		For(&designatev1beta1.DesignateBackendbind9{}).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
+		Owns(&corev1.Pod{}).
 		// watch the config CMs we don't own
 		Watches(&corev1.ConfigMap{},
 			handler.EnqueueRequestsFromMapFunc(configMapFn)).
@@ -661,6 +663,13 @@ func (r *DesignateBackendbind9Reconciler) reconcileNormal(ctx context.Context, i
 	}
 	// create StatefulSet - end
 
+	// Handle pod labeling for predictable IPs
+	err = r.handlePodLabeling(ctx, instance, helper)
+	if err != nil {
+		Log.Error(err, "Failed to handle pod labeling")
+		// Don't return error as this is not critical for the main reconcile loop
+	}
+
 	// We reached the end of the Reconcile, update the Ready condition based on
 	// the sub conditions
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
@@ -894,4 +903,86 @@ func (r *DesignateBackendbind9Reconciler) hasSecretChanged(
 	}
 	_, updated := util.SetHash(instance.Status.Hash, hashKey, hashValue)
 	return updated, nil
+}
+
+// addPredictableIPLabel adds the predictableip label to a pod based on its index and the configmap
+func (r *DesignateBackendbind9Reconciler) addPredictableIPLabel(ctx context.Context, pod *corev1.Pod, instance *designatev1beta1.DesignateBackendbind9) error {
+	Log := r.GetLogger(ctx)
+
+	// Check if the pod already has the predictableip label
+	if pod.Labels != nil && pod.Labels["predictableip"] != "" {
+		return nil
+	}
+
+	// Extract pod index from pod name (e.g., "designate-backendbind9-0" -> "0")
+	podName := pod.Name
+	nameParts := strings.Split(podName, "-")
+	if len(nameParts) == 0 {
+		return fmt.Errorf("invalid pod name format: %s", podName)
+	}
+	podIndex := nameParts[len(nameParts)-1]
+
+	// Get the bind IP configmap
+	configMap := &corev1.ConfigMap{}
+	err := r.GetClient().Get(ctx, types.NamespacedName{Name: designate.BindPredIPConfigMap, Namespace: instance.GetNamespace()}, configMap)
+	if err != nil {
+		if k8s_errors.IsNotFound(err) {
+			Log.Info("bind IP configmap not found, skipping predictableip label")
+			return nil
+		}
+		return err
+	}
+
+	// Get the IP for this pod index
+	ipKey := fmt.Sprintf("bind_address_%s", podIndex)
+	predictableIP, exists := configMap.Data[ipKey]
+	if !exists {
+		Log.Info(fmt.Sprintf("No IP found for pod index %s in configmap", podIndex))
+		return nil
+	}
+
+	// Add the predictableip label to the pod
+	if pod.Labels == nil {
+		pod.Labels = make(map[string]string)
+	}
+	pod.Labels["predictableip"] = predictableIP
+
+	// Update the pod
+	err = r.GetClient().Update(ctx, pod)
+	if err != nil {
+		return fmt.Errorf("failed to update pod with predictableip label: %w", err)
+	}
+
+	Log.Info(fmt.Sprintf("Added predictableip label %s to pod %s", predictableIP, podName))
+	return nil
+}
+
+// handlePodLabeling handles adding predictableip labels to pods
+func (r *DesignateBackendbind9Reconciler) handlePodLabeling(ctx context.Context, instance *designatev1beta1.DesignateBackendbind9, helper *helper.Helper) error {
+	Log := r.GetLogger(ctx)
+
+	// List all pods owned by this instance
+	podList := &corev1.PodList{}
+	listOpts := []client.ListOption{
+		client.InNamespace(instance.Namespace),
+		client.MatchingLabels{
+			common.AppSelector: instance.Name,
+		},
+	}
+
+	err := helper.GetClient().List(ctx, podList, listOpts...)
+	if err != nil {
+		return fmt.Errorf("failed to list pods: %w", err)
+	}
+
+	// Process each pod
+	for _, pod := range podList.Items {
+		err := r.addPredictableIPLabel(ctx, &pod, instance)
+		if err != nil {
+			Log.Error(err, fmt.Sprintf("Failed to add predictableip label to pod %s", pod.Name))
+			// Continue processing other pods
+		}
+	}
+
+	return nil
 }
