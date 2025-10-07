@@ -42,17 +42,11 @@ const (
 	// DesignateRndcKey is the key name for RNDC configuration
 	DesignateRndcKey = "rndc-key"
 
-	// MdnsPredIPConfigMap is the name of the ConfigMap containing MDNS predictable IP mappings
-	MdnsPredIPConfigMap = "designate-mdns-ip-map"
-
 	// NsRecordsConfigMap is the name of the ConfigMap containing name server record parameters
 	NsRecordsConfigMap = "designate-ns-records-params"
 
 	// NsRecordsCRContent is the content key for name server records custom resource
 	NsRecordsCRContent = "designate-ns-records"
-
-	// BindPredIPConfigMap is the name of the ConfigMap containing bind predictable IP mappings
-	BindPredIPConfigMap = "designate-bind-ip-map"
 
 	// RndcConfDir is the directory path for RNDC configuration files
 	RndcConfDir = "/etc/designate/rndc-keys"
@@ -69,14 +63,8 @@ const (
 	// PoolsYamlContent is the content key for pools YAML configuration
 	PoolsYamlContent = "pools-yaml-content"
 
-	// BindPredictableIPHash key for status hash
-	BindPredictableIPHash = "Bind IP Map"
-
 	// RndcHash key for status hash
 	RndcHash = "Rndc keys"
-
-	// PredictableIPCommand -
-	PredictableIPCommand = "/usr/local/bin/container-scripts/setipalias.sh"
 
 	// ScriptsF is the sprintf template for common scripts secret
 	ScriptsF = "%s-scripts"
@@ -86,4 +74,10 @@ const (
 
 	// DefaultOverwriteTemplate sprintf template for common default overwrite secret
 	DefaultOverwriteTemplate = "%s-defaults"
+
+	// MdnsPredIPConfigMap is the name of the ConfigMap containing mDNS predictable IP mappings
+	MdnsPredIPConfigMap = "designate-mdns-ip-map"
+
+	// BindPredIPConfigMap is the name of the ConfigMap containing bind predictable IP mappings
+	BindPredIPConfigMap = "designate-bind-ip-map"
 )

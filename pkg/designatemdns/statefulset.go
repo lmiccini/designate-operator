@@ -39,15 +39,11 @@ func StatefulSet(
 	rootUser := int64(0)
 	serviceName := instance.Name
 
-	// Pods using predictable IPs and setipalias.py have both a different script path and an additonal predictable IP
-	// mount. Instead of putting some convoluted logic in the common case, just explode out the individual mappings
-	// here.
 	volumeDefs := []designate.VolumeMapping{
 		{Name: designate.ScriptsVolumeName(instance.Name), Type: designate.ScriptMount, MountPath: "/usr/local/bin/container-scripts"},
 		{Name: designate.ConfigVolumeName(designate.GetOwningDesignateName(instance)), Type: designate.SecretMount, MountPath: "/var/lib/config-data/default"},
 		{Name: designate.ConfigVolumeName(instance.Name), Type: designate.SecretMount, MountPath: "/var/lib/config-data/service"},
 		{Name: designate.MergedVolumeName(instance.Name), Type: designate.MergeMount, MountPath: "/var/lib/config-data/merged"},
-		{Name: designate.MdnsPredIPConfigMap, Type: designate.ConfigMount, MountPath: "/var/lib/predictableips"},
 		{Name: designate.DefaultsVolumeName(designate.GetOwningDesignateName(instance)), Type: designate.SecretMount, MountPath: "/var/lib/config-data/common-overwrites"},
 		{Name: designate.DefaultsVolumeName(instance.Name), Type: designate.SecretMount, MountPath: "/var/lib/config-data/overwrites"},
 		{Name: designate.MergedDefaultsVolumeName(instance.Name), Type: designate.MergeMount, MountPath: "/var/lib/config-data/config-overwrites"},
@@ -153,23 +149,27 @@ func StatefulSet(
 
 	envVars = map[string]env.Setter{}
 	envVars["POD_NAME"] = env.DownwardAPI("metadata.name")
-	envVars["MAP_PREFIX"] = env.SetValue("mdns_address_")
-	podEnv := env.MergeEnvs([]corev1.EnvVar{}, envVars)
+	envVars["POD_NAMESPACE"] = env.DownwardAPI("metadata.namespace")
+	// NETWORK_ATTACHMENT_DEFINITION will be set by the controller
+
+	// Add predictable IP from pod annotation using downward API
+	predictableIPEnvVar := corev1.EnvVar{
+		Name: "PREDICTABLE_IP_FROM_ANNOTATION",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.annotations['designate.openstack.org/predictable-ip']",
+			},
+		},
+	}
+
+	podEnv := env.MergeEnvs([]corev1.EnvVar{predictableIPEnvVar}, envVars)
 	initContainerDetails := designate.InitContainerDetails{
 		ContainerImage: instance.Spec.ContainerImage,
 		VolumeMounts:   initVolumeMounts,
 		EnvVars:        podEnv,
 	}
-	predIPContainerDetails := designate.PredIPContainerDetails{
-		ContainerImage: instance.Spec.NetUtilsImage,
-		VolumeMounts:   initVolumeMounts,
-		EnvVars:        podEnv,
-		Command:        designate.PredictableIPCommand,
-	}
-
 	statefulSet.Spec.Template.Spec.InitContainers = []corev1.Container{
 		designate.SimpleInitContainer(initContainerDetails),
-		designate.PredictableIPContainer(predIPContainerDetails),
 	}
 
 	return statefulSet

@@ -48,7 +48,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
-	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
+	networkattachment "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
@@ -612,7 +612,7 @@ func (r *DesignateMdnsReconciler) reconcileNormal(ctx context.Context, instance 
 	// networks to attach to
 	nadList := []networkv1.NetworkAttachmentDefinition{}
 	for _, netAtt := range instance.Spec.NetworkAttachments {
-		nad, err := nad.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
+		nad, err := networkattachment.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
 				// Since the net-attach-def CR should have been manually created by the user and referenced in the spec,
@@ -640,10 +640,20 @@ func (r *DesignateMdnsReconciler) reconcileNormal(ctx context.Context, instance 
 		}
 	}
 
-	serviceAnnotations, err := nad.EnsureNetworksAnnotation(nadList)
+	serviceAnnotations, err := networkattachment.EnsureNetworksAnnotation(nadList)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed create network annotation from %s: %w",
 			instance.Spec.NetworkAttachments, err)
+	}
+
+	// Note: Predictable IP annotations are handled by the Pod annotation controller
+	// which can properly extract pod indices from individual pod names
+
+	// Get parent Designate CR for environment variable configuration
+	parentDesignate := &designatev1beta1.Designate{}
+	err = r.Get(ctx, types.NamespacedName{Name: designate.GetOwningDesignateName(instance), Namespace: instance.Namespace}, parentDesignate)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to get parent Designate CR: %w", err)
 	}
 
 	// Handle service init
@@ -697,6 +707,20 @@ func (r *DesignateMdnsReconciler) reconcileNormal(ctx context.Context, instance 
 
 	// Define a new Mdns StatefulSet object
 	statefulSetDef := designatemdns.StatefulSet(instance, inputHash, serviceLabels, serviceAnnotations, topology)
+
+	// Add NETWORK_ATTACHMENT_DEFINITION environment variable to init containers
+	if parentDesignate.Spec.DesignateNetworkAttachment != "" {
+		for i := range statefulSetDef.Spec.Template.Spec.InitContainers {
+			statefulSetDef.Spec.Template.Spec.InitContainers[i].Env = append(
+				statefulSetDef.Spec.Template.Spec.InitContainers[i].Env,
+				corev1.EnvVar{
+					Name:  "NETWORK_ATTACHMENT_DEFINITION",
+					Value: parentDesignate.Spec.DesignateNetworkAttachment,
+				},
+			)
+		}
+	}
+
 	statefulSet := statefulset.NewStatefulSet(
 		statefulSetDef,
 		time.Duration(5)*time.Second,
@@ -724,7 +748,7 @@ func (r *DesignateMdnsReconciler) reconcileNormal(ctx context.Context, instance 
 		instance.Status.ReadyCount = deploy.Status.ReadyReplicas
 
 		// verify if network attachment matches expectations
-		networkReady, networkAttachmentStatus, err := nad.VerifyNetworkStatusFromAnnotation(
+		networkReady, networkAttachmentStatus, err := networkattachment.VerifyNetworkStatusFromAnnotation(
 			ctx,
 			helper,
 			instance.Spec.NetworkAttachments,
@@ -841,9 +865,9 @@ func (r *DesignateMdnsReconciler) generateServiceConfigMaps(
 			Type:         util.TemplateTypeScripts,
 			InstanceType: instance.Kind,
 			AdditionalTemplate: map[string]string{
-				"init.sh":       "/common/init.sh",
-				"common.sh":     "/common/common.sh",
-				"setipalias.py": "/common/setipalias.py",
+				"init.sh":               "/common/init.sh",
+				"common.sh":             "/common/common.sh",
+				"set-predictable-ip.sh": "/common/set-predictable-ip.sh",
 			},
 			Labels: cmLabels,
 		},

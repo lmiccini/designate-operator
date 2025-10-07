@@ -186,25 +186,29 @@ func StatefulSet(
 	// database. Should clean this up!
 	envVars = map[string]env.Setter{}
 	envVars["POD_NAME"] = env.DownwardAPI("metadata.name")
+	envVars["POD_NAMESPACE"] = env.DownwardAPI("metadata.namespace")
 	envVars["CustomConf"] = env.SetValue(common.CustomServiceConfigFileName)
-	envVars["MAP_PREFIX"] = env.SetValue("bind_address_")
 	envVars["RNDC_PREFIX"] = env.SetValue(designate.DesignateRndcKey)
-	env := env.MergeEnvs([]corev1.EnvVar{}, envVars)
+	// NETWORK_ATTACHMENT_DEFINITION will be set by the controller
+
+	// Add predictable IP from pod annotation using downward API
+	predictableIPEnvVar := corev1.EnvVar{
+		Name: "PREDICTABLE_IP_FROM_ANNOTATION",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.annotations['designate.openstack.org/predictable-ip']",
+			},
+		},
+	}
+
+	env := env.MergeEnvs([]corev1.EnvVar{predictableIPEnvVar}, envVars)
 	initContainerDetails := designate.InitContainerDetails{
 		ContainerImage: instance.Spec.ContainerImage,
 		VolumeMounts:   getInitVolumeMounts(),
 		EnvVars:        env,
 	}
-	predIPContainerDetails := designate.PredIPContainerDetails{
-		ContainerImage: instance.Spec.NetUtilsImage,
-		VolumeMounts:   getPredIPVolumeMounts(),
-		EnvVars:        env,
-		Command:        designate.PredictableIPCommand,
-	}
-
 	statefulSet.Spec.Template.Spec.InitContainers = []corev1.Container{
 		designate.SimpleInitContainer(initContainerDetails),
-		designate.PredictableIPContainer(predIPContainerDetails),
 	}
 
 	return statefulSet, nil

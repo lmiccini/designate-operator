@@ -745,7 +745,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	}
 	Log.Info("Deployment API task reconciled")
 
-	// Handle Mdns predictable IPs configmap
+	// Get network attachment definition for IP range detection
 	nad, err := nad.GetNADWithName(ctx, helper, instance.Spec.DesignateNetworkAttachment, instance.Namespace)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -768,18 +768,14 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		return ctrl.Result{}, err
 	}
 
-	// Fetch allocated ips from Mdns and Bind config maps and store them in allocatedIPs
-	mdnsLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
-	mdnsConfigMap, err := r.handleConfigMap(ctx, helper, instance, designate.MdnsPredIPConfigMap, mdnsLabels)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
+	// TODO: Update IP allocation to work with Multus CNI instead of predictable IPs
+	// mdnsLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
+	// mdnsConfigMap, err := r.handleConfigMap(ctx, helper, instance, designate.MdnsPredIPConfigMap, mdnsLabels)
+	// if err != nil {
+	// 	return ctrl.Result{}, err
+	// }
 
 	bindLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
-	bindConfigMap, err := r.handleConfigMap(ctx, helper, instance, designate.BindPredIPConfigMap, bindLabels)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 
 	nsRecordsLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
 	nsRecords, err := r.getNSRecords(ctx, helper, instance, nsRecordsLabels)
@@ -787,67 +783,11 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		return ctrl.Result{}, err
 	}
 
-	allocatedIPs := make(map[string]bool)
-	for _, predIP := range bindConfigMap.Data {
-		allocatedIPs[predIP] = true
-	}
-	for _, predIP := range mdnsConfigMap.Data {
-		allocatedIPs[predIP] = true
-	}
-
-	// Handle Mdns predictable IPs configmap
-	// We cannot have 0 mDNS pods so even though the CRD validation allows 0, don't allow it.
-	mdnsReplicaCount := max(int(*instance.Spec.DesignateMdns.Replicas), 1)
-	var mdnsNames []string
-	for i := 0; i < mdnsReplicaCount; i++ {
-		mdnsNames = append(mdnsNames, fmt.Sprintf("mdns_address_%d", i))
-	}
-
-	updatedMap, allocatedIPs, err := r.allocatePredictableIPs(ctx, predictableIPParams, mdnsNames, mdnsConfigMap.Data, allocatedIPs)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), mdnsConfigMap, func() error {
-		mdnsConfigMap.Labels = util.MergeStringMaps(mdnsConfigMap.Labels, mdnsLabels)
-		mdnsConfigMap.Data = updatedMap
-		return controllerutil.SetControllerReference(instance, mdnsConfigMap, helper.GetScheme())
-	})
-
-	if err != nil {
-		Log.Info("Unable to create config map for mdns ips...")
-		return ctrl.Result{}, err
-	}
-
-	// Handle Bind predictable IPs configmap
-	// Unlike mDNS, we can have 0 binds when byob is used.
-	// NOTE(beagles) Really it might make more sense to have BYOB be an explicit flag and not assume that a 0
-	// value is a byob case. Something to think about.
-	bindReplicaCount := int(*instance.Spec.DesignateBackendbind9.Replicas)
-	var bindNames []string
-	for i := range bindReplicaCount {
-		bindNames = append(bindNames, fmt.Sprintf("bind_address_%d", i))
-	}
-
-	updatedBindMap, _, err := r.allocatePredictableIPs(ctx, predictableIPParams, bindNames, bindConfigMap.Data, allocatedIPs)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	Log.Info("Before creating bind configmap")
-
-	_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), bindConfigMap, func() error {
-		bindConfigMap.Labels = util.MergeStringMaps(bindConfigMap.Labels, bindLabels)
-		bindConfigMap.Data = updatedBindMap
-		return controllerutil.SetControllerReference(instance, bindConfigMap, helper.GetScheme())
-	})
-
-	if err != nil {
-		Log.Info("Unable to create config map for bind ips...")
-		return ctrl.Result{}, err
-	}
-
-	Log.Info("Bind configmap was created successfully")
+	// TODO: IP allocation is now handled by Multus CNI annotations instead of predictable IPs
+	// The following code has been removed as it depends on the predictable IP system:
+	// - allocatedIPs tracking
+	// - mdnsConfigMap and bindConfigMap creation
+	// - allocatePredictableIPs function calls
 	if len(nsRecords) > 0 && instance.Status.DesignateCentralReadyCount > 0 {
 		Log.Info("NS records data found")
 		poolsYamlConfigMap := &corev1.ConfigMap{
@@ -859,7 +799,12 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			Data: make(map[string]string),
 		}
 
-		poolsYaml, poolsYamlHash, err := designate.GeneratePoolsYamlDataAndHash(bindConfigMap.Data, mdnsConfigMap.Data, nsRecords)
+		// Generate predictable IP maps for pools YAML generation
+		bindReplicas := int(*instance.Spec.DesignateBackendbind9.Replicas)
+		mdnsReplicas := max(int(*instance.Spec.DesignateMdns.Replicas), 1)
+		bindMap, mdnsMap := designate.GeneratePredictableIPMaps(predictableIPParams, bindReplicas, mdnsReplicas)
+
+		poolsYaml, poolsYamlHash, err := designate.GeneratePoolsYamlDataAndHash(bindMap, mdnsMap, nsRecords)
 		if err != nil {
 			return ctrl.Result{}, err
 		}

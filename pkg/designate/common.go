@@ -17,8 +17,11 @@ limitations under the License.
 package designate
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	mariadbv1 "github.com/openstack-k8s-operators/mariadb-operator/api/v1beta1"
 )
@@ -89,4 +92,139 @@ type Database struct {
 type MessageBus struct {
 	SecretName string
 	Status     MessageBusStatus
+}
+
+// MultusNetworkConfig represents a single network configuration for Multus CNI
+type MultusNetworkConfig struct {
+	Name         string   `json:"name"`
+	Namespace    string   `json:"namespace,omitempty"`
+	Interface    string   `json:"interface,omitempty"`
+	IPs          []string `json:"ips,omitempty"`
+	MAC          string   `json:"mac,omitempty"`
+	DefaultRoute []string `json:"default-route,omitempty"`
+}
+
+// CreateMultusAnnotation creates a Multus CNI annotation for pod specifications
+func CreateMultusAnnotation(networks []MultusNetworkConfig) (string, error) {
+	if len(networks) == 0 {
+		return "", nil
+	}
+
+	networksJSON, err := json.Marshal(networks)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal networks to JSON: %w", err)
+	}
+
+	return string(networksJSON), nil
+}
+
+// CreatePredictableMultusAnnotation creates a Multus CNI annotation with predictable IPs
+func CreatePredictableMultusAnnotation(networkName, interfaceName string, podIndex int, predParams *NADIpam) (string, error) {
+	// Calculate predictable IP based on pod index from the IPAM parameters
+	ip := predParams.RangeStart
+	for i := 0; i < podIndex; i++ {
+		ip = ip.Next()
+		if ip == predParams.RangeEnd {
+			return "", fmt.Errorf("pod index %d exceeds available IP range", podIndex)
+		}
+	}
+
+	networks := []MultusNetworkConfig{
+		{
+			Name:      networkName,
+			Interface: interfaceName,
+			IPs:       []string{ip.String()},
+		},
+	}
+
+	return CreateMultusAnnotation(networks)
+}
+
+// CreatePerPodPredictableAnnotations creates annotations for a specific pod based on its index
+func CreatePerPodPredictableAnnotations(networkName, interfaceName string, podIndex int, predParams *NADIpam) (map[string]string, error) {
+	annotations := make(map[string]string)
+
+	// Calculate predictable IP for this specific pod
+	predictableIP, err := GetPodPredictableIP(predParams, podIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create Multus annotation with the specific IP
+	networks := []MultusNetworkConfig{
+		{
+			Name:      networkName,
+			Interface: interfaceName,
+			IPs:       []string{predictableIP},
+		},
+	}
+
+	multusAnnotation, err := CreateMultusAnnotation(networks)
+	if err != nil {
+		return nil, err
+	}
+
+	annotations["k8s.v1.cni.cncf.io/networks"] = multusAnnotation
+	annotations["designate.openstack.org/predictable-ip"] = predictableIP
+	annotations["designate.openstack.org/pod-index"] = fmt.Sprintf("%d", podIndex)
+
+	return annotations, nil
+}
+
+// GeneratePredictableIPMaps creates IP maps for bind and mdns services based on network parameters
+func GeneratePredictableIPMaps(predParams *NADIpam, bindReplicas, mdnsReplicas int) (bindMap, mdnsMap map[string]string) {
+	bindMap = make(map[string]string)
+	mdnsMap = make(map[string]string)
+
+	// Generate bind IPs
+	ip := predParams.RangeStart
+	for i := 0; i < bindReplicas; i++ {
+		if ip == predParams.RangeEnd {
+			break // Don't exceed the range
+		}
+		bindMap[fmt.Sprintf("bind_address_%d", i)] = ip.String()
+		ip = ip.Next()
+	}
+
+	// Generate mdns IPs
+	for i := 0; i < mdnsReplicas; i++ {
+		if ip == predParams.RangeEnd {
+			break // Don't exceed the range
+		}
+		mdnsMap[fmt.Sprintf("mdns_address_%d", i)] = ip.String()
+		ip = ip.Next()
+	}
+
+	return bindMap, mdnsMap
+}
+
+// GetPodPredictableIP calculates the predictable IP for a specific pod index
+func GetPodPredictableIP(predParams *NADIpam, podIndex int) (string, error) {
+	ip := predParams.RangeStart
+	for i := 0; i < podIndex; i++ {
+		ip = ip.Next()
+		if ip == predParams.RangeEnd {
+			return "", fmt.Errorf("pod index %d exceeds available IP range", podIndex)
+		}
+	}
+	return ip.String(), nil
+}
+
+// ExtractPodIndexFromName extracts the pod index from a StatefulSet pod name
+// StatefulSet pods are named as {statefulset-name}-{ordinal}
+func ExtractPodIndexFromName(podName string) (int, error) {
+	// Find the last dash in the pod name
+	lastDashIndex := strings.LastIndex(podName, "-")
+	if lastDashIndex == -1 {
+		return 0, fmt.Errorf("invalid pod name format: %s", podName)
+	}
+
+	// Extract the ordinal part
+	ordinalStr := podName[lastDashIndex+1:]
+	ordinal, err := strconv.Atoi(ordinalStr)
+	if err != nil {
+		return 0, fmt.Errorf("invalid ordinal in pod name %s: %w", podName, err)
+	}
+
+	return ordinal, nil
 }

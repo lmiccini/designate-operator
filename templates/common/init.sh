@@ -26,6 +26,26 @@ SCRIPTPATH="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 
 cp -a ${SVC_CFG} ${SVC_CFG_MERGED}
 
+# Calculate predictable IP for this pod (if NETWORK_ATTACHMENT_DEFINITION is set)
+if [[ -n "${NETWORK_ATTACHMENT_DEFINITION}" ]]; then
+    echo "Calculating predictable IP for pod..."
+    ${SCRIPTPATH}/set-predictable-ip.sh
+    if [[ $? -eq 0 ]]; then
+        # Source the predictable IP environment variables
+        source /var/lib/config-data/merged/predictable-ip.env
+        echo "Using predictable IP: ${PREDICTABLE_IP}"
+
+        # Update designate.conf to listen on the specific IP (for mdns service)
+        if [[ -f "/var/lib/config-data/merged/designate.conf" ]]; then
+            sed -i "s/listen=0.0.0.0:5354/listen=${PREDICTABLE_IP}:5354/" /var/lib/config-data/merged/designate.conf
+            echo "Updated designate.conf to listen on ${PREDICTABLE_IP}:5354"
+        fi
+    else
+        echo "WARNING: Failed to calculate predictable IP, using default configuration"
+    fi
+else
+    echo "INFO: NETWORK_ATTACHMENT_DEFINITION not set, using default configuration"
+fi
 
 # Merge all templates from core config secret
 for dir in /var/lib/config-data/default; do

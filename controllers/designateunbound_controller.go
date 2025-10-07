@@ -25,6 +25,7 @@ import (
 	"github.com/go-logr/logr"
 	networkv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	designatev1 "github.com/openstack-k8s-operators/designate-operator/api/v1beta1"
+	designatev1beta1 "github.com/openstack-k8s-operators/designate-operator/api/v1beta1"
 	"github.com/openstack-k8s-operators/designate-operator/pkg/designate"
 	"github.com/openstack-k8s-operators/designate-operator/pkg/designateunbound"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
@@ -33,6 +34,7 @@ import (
 	k8s_errors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,11 +45,10 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
-	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
+	networkattachment "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
-	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -344,7 +345,7 @@ func (r *UnboundReconciler) reconcileNormal(ctx context.Context, instance *desig
 
 	nadList := []networkv1.NetworkAttachmentDefinition{}
 	for _, networkAttachment := range instance.Spec.NetworkAttachments {
-		nad, err := nad.GetNADWithName(ctx, helper, networkAttachment, instance.Namespace)
+		nad, err := networkattachment.GetNADWithName(ctx, helper, networkAttachment, instance.Namespace)
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
 				// Since the net-attach-def CR should have been manually created by the user and referenced in the spec,
@@ -372,7 +373,7 @@ func (r *UnboundReconciler) reconcileNormal(ctx context.Context, instance *desig
 		}
 	}
 
-	serviceAnnotations, err := nad.EnsureNetworksAnnotation(nadList)
+	serviceAnnotations, err := networkattachment.EnsureNetworksAnnotation(nadList)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed create network annotation from %s: %w",
 			instance.Spec.NetworkAttachments, err)
@@ -451,7 +452,7 @@ func (r *UnboundReconciler) reconcileNormal(ctx context.Context, instance *desig
 		networkReady := false
 		networkAttachmentStatus := map[string][]string{}
 		if *instance.Spec.Replicas > 0 && len(instance.Spec.NetworkAttachments) > 0 {
-			networkReady, networkAttachmentStatus, err = nad.VerifyNetworkStatusFromAnnotation(
+			networkReady, networkAttachmentStatus, err = networkattachment.VerifyNetworkStatusFromAnnotation(
 				ctx,
 				helper,
 				instance.Spec.NetworkAttachments,
@@ -548,18 +549,43 @@ func (r *UnboundReconciler) generateServiceConfigMaps(
 
 	stubZoneData := make([]StubZoneTmplRec, len(instance.Spec.StubZones))
 	if len(instance.Spec.StubZones) > 0 {
-		bindIPMap := &corev1.ConfigMap{}
-		err := h.GetClient().Get(ctx, types.NamespacedName{Name: designate.BindPredIPConfigMap, Namespace: instance.GetNamespace()}, bindIPMap)
+		// Get bind IPs from the parent Designate CR's network parameters
+		parentDesignate := &designatev1beta1.Designate{}
+		err := h.GetClient().Get(ctx, types.NamespacedName{Name: designate.GetOwningDesignateName(instance), Namespace: instance.GetNamespace()}, parentDesignate)
 		if err != nil {
-			if k8s_errors.IsNotFound(err) {
-				Log.Info("nameserver IPs not available, unable to complete unbound configuration at this time")
-			}
+			Log.Info("Unable to get parent Designate CR for stub zone configuration")
 			return err
 		}
-		bindIPs := make([]string, len(bindIPMap.Data))
-		keyTmpl := "bind_address_%d"
-		for i := 0; i < len(bindIPMap.Data); i++ {
-			bindIPs[i] = bindIPMap.Data[fmt.Sprintf(keyTmpl, i)]
+
+		// Get network attachment definition for IP range detection
+		nad, err := networkattachment.GetNADWithName(ctx, h, parentDesignate.Spec.DesignateNetworkAttachment, instance.Namespace)
+		if err != nil {
+			Log.Info("Unable to get network attachment definition for stub zone configuration")
+			return err
+		}
+
+		networkParameters, err := designate.GetNetworkParametersFromNAD(nad)
+		if err != nil {
+			Log.Info("Unable to get network parameters for stub zone configuration")
+			return err
+		}
+
+		predictableIPParams, err := designate.GetPredictableIPAM(networkParameters)
+		if err != nil {
+			Log.Info("Unable to get predictable IP parameters for stub zone configuration")
+			return err
+		}
+
+		// Generate bind IPs for stub zones
+		bindReplicas := int(*parentDesignate.Spec.DesignateBackendbind9.Replicas)
+		bindMap, _ := designate.GeneratePredictableIPMaps(predictableIPParams, bindReplicas, 0)
+
+		// Convert bind map to slice of IPs
+		bindIPs := make([]string, 0, len(bindMap))
+		for i := 0; i < bindReplicas; i++ {
+			if ip, exists := bindMap[fmt.Sprintf("bind_address_%d", i)]; exists {
+				bindIPs = append(bindIPs, ip)
+			}
 		}
 
 		for i := 0; i < len(instance.Spec.StubZones); i++ {

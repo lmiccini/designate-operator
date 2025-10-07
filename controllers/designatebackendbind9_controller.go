@@ -48,7 +48,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/env"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
-	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
+	networkattachment "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/statefulset"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/util"
@@ -474,16 +474,12 @@ func (r *DesignateBackendbind9Reconciler) reconcileNormal(ctx context.Context, i
 		return ctrl.Result{}, nil
 	}
 
-	bindIPsUpdated, err := r.hasMapChanged(ctx, helper, instance, designate.BindPredIPConfigMap, designate.BindPredictableIPHash)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 	rndcUpdate, err := r.hasSecretChanged(ctx, helper, instance, designate.DesignateBindKeySecret, designate.RndcHash)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if rndcUpdate || bindIPsUpdated {
-		// Predictable IPs and/or rndc keys have been updated, we need to update the statefulset.
+	if rndcUpdate {
+		// RNDC keys have been updated, we need to update the statefulset.
 		return ctrl.Result{}, nil
 	}
 
@@ -497,7 +493,7 @@ func (r *DesignateBackendbind9Reconciler) reconcileNormal(ctx context.Context, i
 	// networks to attach to
 	nadList := []networkv1.NetworkAttachmentDefinition{}
 	for _, netAtt := range instance.Spec.NetworkAttachments {
-		nad, err := nad.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
+		nad, err := networkattachment.GetNADWithName(ctx, helper, netAtt, instance.Namespace)
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
 				// Since the net-attach-def CR should have been manually created by the user and referenced in the spec,
@@ -525,10 +521,20 @@ func (r *DesignateBackendbind9Reconciler) reconcileNormal(ctx context.Context, i
 		}
 	}
 
-	serviceAnnotations, err := nad.EnsureNetworksAnnotation(nadList)
+	serviceAnnotations, err := networkattachment.EnsureNetworksAnnotation(nadList)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed create network annotation from %s: %w",
 			instance.Spec.NetworkAttachments, err)
+	}
+
+	// Note: Predictable IP annotations are handled by the Pod annotation controller
+	// which can properly extract pod indices from individual pod names
+
+	// Get parent Designate CR for environment variable configuration
+	parentDesignate := &designatev1beta1.Designate{}
+	err = r.Get(ctx, types.NamespacedName{Name: designate.GetOwningDesignateName(instance), Namespace: instance.Namespace}, parentDesignate)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to get parent Designate CR: %w", err)
 	}
 
 	// Handle service init
@@ -585,6 +591,19 @@ func (r *DesignateBackendbind9Reconciler) reconcileNormal(ctx context.Context, i
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+
+	// Add NETWORK_ATTACHMENT_DEFINITION environment variable to init containers
+	if parentDesignate.Spec.DesignateNetworkAttachment != "" {
+		for i := range deplDef.Spec.Template.Spec.InitContainers {
+			deplDef.Spec.Template.Spec.InitContainers[i].Env = append(
+				deplDef.Spec.Template.Spec.InitContainers[i].Env,
+				corev1.EnvVar{
+					Name:  "NETWORK_ATTACHMENT_DEFINITION",
+					Value: parentDesignate.Spec.DesignateNetworkAttachment,
+				},
+			)
+		}
+	}
 	depl := statefulset.NewStatefulSet(
 		deplDef,
 		time.Duration(5)*time.Second,
@@ -615,7 +634,7 @@ func (r *DesignateBackendbind9Reconciler) reconcileNormal(ctx context.Context, i
 		networkReady := false
 		networkAttachmentStatus := map[string][]string{}
 		if *(instance.Spec.Replicas) > 0 {
-			networkReady, networkAttachmentStatus, err = nad.VerifyNetworkStatusFromAnnotation(
+			networkReady, networkAttachmentStatus, err = networkattachment.VerifyNetworkStatusFromAnnotation(
 				ctx,
 				helper,
 				instance.Spec.NetworkAttachments,
@@ -718,7 +737,7 @@ func (r *DesignateBackendbind9Reconciler) generateServiceConfigMaps(
 
 	var nadInfo *designate.NADConfig
 	for _, netAtt := range instance.Spec.NetworkAttachments {
-		nad, err := nad.GetNADWithName(ctx, h, netAtt, instance.Namespace)
+		nad, err := networkattachment.GetNADWithName(ctx, h, netAtt, instance.Namespace)
 		if err != nil {
 			if k8s_errors.IsNotFound(err) {
 				// Since the net-attach-def CR should have been manually created by the user and referenced in the spec,
@@ -791,8 +810,8 @@ func (r *DesignateBackendbind9Reconciler) generateServiceConfigMaps(
 			Type:         util.TemplateTypeScripts,
 			InstanceType: instance.Kind,
 			AdditionalTemplate: map[string]string{
-				"common.sh":     "/common/common.sh",
-				"setipalias.py": "/common/setipalias.py",
+				"common.sh":             "/common/common.sh",
+				"set-predictable-ip.sh": "/common/set-predictable-ip.sh",
 			},
 			Labels: cmLabels,
 		},

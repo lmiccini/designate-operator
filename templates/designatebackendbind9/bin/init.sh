@@ -19,6 +19,33 @@ set -ex
 SCRIPTPATH="$( cd "$(dirname "$0")" >/dev/null 2>&1 ; pwd -P )"
 . ${SCRIPTPATH}/common.sh --source-only
 
+# Calculate predictable IP for this pod
+if [[ -n "${NETWORK_ATTACHMENT_DEFINITION}" ]]; then
+    echo "Calculating predictable IP for pod..."
+    ${SCRIPTPATH}/set-predictable-ip.sh
+    if [[ $? -eq 0 ]]; then
+        # Source the predictable IP environment variables
+        source /var/lib/config-data/merged/predictable-ip.env
+        echo "Using predictable IP: ${PREDICTABLE_IP}"
+
+        # Update BIND9 configuration to listen on the specific IP
+        if [[ -f "/var/lib/config-data/merged/named/options.conf" ]]; then
+            sed -i "s/listen-on port 53 { any; };/listen-on port 53 { ${PREDICTABLE_IP}; };/" /var/lib/config-data/merged/named/options.conf
+            echo "Updated options.conf to listen on ${PREDICTABLE_IP}:53"
+        fi
+
+        # Update RNDC configuration to use the specific IP
+        if [[ -f "/var/lib/config-data/merged/named/rndc.conf" ]]; then
+            sed -i "s/inet \* port 953/inet ${PREDICTABLE_IP} port 953/" /var/lib/config-data/merged/named/rndc.conf
+            echo "Updated rndc.conf to use ${PREDICTABLE_IP}:953"
+        fi
+    else
+        echo "WARNING: Failed to calculate predictable IP, using default configuration"
+    fi
+else
+    echo "WARNING: NETWORK_ATTACHMENT_DEFINITION not set, using default configuration"
+fi
+
 # Merge all templates from config CM
 for dir in /var/lib/config-data/default; do
     merge_config_dir ${dir}

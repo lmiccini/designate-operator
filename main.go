@@ -220,6 +220,16 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Pod annotation controller for predictable IPs
+	if err = (&controllers.PodAnnotationReconciler{
+		Client:  mgr.GetClient(),
+		Kclient: kclient,
+		Scheme:  mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "PodAnnotation")
+		os.Exit(1)
+	}
+
 	// Acquire environmental defaults and initialize operator defaults with them
 	designatev1beta1.SetupDefaults()
 
