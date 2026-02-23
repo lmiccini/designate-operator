@@ -39,15 +39,12 @@ func StatefulSet(
 	rootUser := int64(0)
 	serviceName := instance.Name
 
-	// Pods using predictable IPs and setipalias.py have both a different script path and an additonal predictable IP
-	// mount. Instead of putting some convoluted logic in the common case, just explode out the individual mappings
-	// here.
+	// Volume mappings for MDNS pods
 	volumeDefs := []designate.VolumeMapping{
 		{Name: designate.ScriptsVolumeName(instance.Name), Type: designate.ScriptMount, MountPath: "/usr/local/bin/container-scripts"},
 		{Name: designate.ConfigVolumeName(designate.GetOwningDesignateName(instance)), Type: designate.SecretMount, MountPath: "/var/lib/config-data/default"},
 		{Name: designate.ConfigVolumeName(instance.Name), Type: designate.SecretMount, MountPath: "/var/lib/config-data/service"},
 		{Name: designate.MergedVolumeName(instance.Name), Type: designate.MergeMount, MountPath: "/var/lib/config-data/merged"},
-		{Name: designate.MdnsPredIPConfigMap, Type: designate.ConfigMount, MountPath: "/var/lib/predictableips"},
 		{Name: designate.DefaultsVolumeName(designate.GetOwningDesignateName(instance)), Type: designate.SecretMount, MountPath: "/var/lib/config-data/common-overwrites"},
 		{Name: designate.DefaultsVolumeName(instance.Name), Type: designate.SecretMount, MountPath: "/var/lib/config-data/overwrites"},
 		{Name: designate.MergedDefaultsVolumeName(instance.Name), Type: designate.MergeMount, MountPath: "/var/lib/config-data/config-overwrites"},

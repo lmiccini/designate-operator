@@ -45,7 +45,6 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/helper"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/job"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
-	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
@@ -795,109 +794,83 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	}
 	Log.Info("Deployment API task reconciled")
 
-	// Handle Mdns predictable IPs configmap
-	nad, err := nad.GetNADWithName(ctx, helper, instance.Spec.DesignateNetworkAttachment, instance.Namespace)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	networkParameters, err := designate.GetNetworkParametersFromNAD(nad)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	//
-	// Predictable IPs.
+	// Create Services for MDNS and Bind pods
+	// Each pod gets its own Service with a stable ClusterIP
 	//
-	// NOTE(oschwart): refactoring this might be nice. This could also  be
-	// optimized but the data sets are small (nodes an IP ranges are less than
-	// 100) so optimization might be a waste.
-	//
-	predictableIPParams, err := designate.GetPredictableIPAM(networkParameters)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	// Fetch allocated ips from Mdns and Bind config maps and store them in allocatedIPs
 	mdnsLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
-	mdnsConfigMap, err := r.handleConfigMap(ctx, helper, instance, designate.MdnsPredIPConfigMap, mdnsLabels)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
 	bindLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
-	bindConfigMap, err := r.handleConfigMap(ctx, helper, instance, designate.BindPredIPConfigMap, bindLabels)
-	if err != nil {
-		return ctrl.Result{}, err
+
+	// Create MDNS Services - we cannot have 0 mDNS pods
+	mdnsReplicaCount := max(int(*instance.Spec.DesignateMdns.Replicas), 1)
+	mdnsServiceIPs := make(map[string]string)
+	mdnsBaseName := fmt.Sprintf("%s-mdns", instance.Name)
+
+	for i := 0; i < mdnsReplicaCount; i++ {
+		podName := designate.MdnsPodName(mdnsBaseName, i)
+		svcName := designate.MdnsServiceName(mdnsBaseName, i)
+
+		svc := designate.PodService(svcName, instance.Namespace, mdnsLabels, podName, 5354, "mdns")
+
+		_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), svc, func() error {
+			svc.Labels = util.MergeStringMaps(svc.Labels, mdnsLabels)
+			return controllerutil.SetControllerReference(instance, svc, helper.GetScheme())
+		})
+		if err != nil {
+			Log.Error(err, fmt.Sprintf("Unable to create service %s for MDNS pod %s", svcName, podName))
+			return ctrl.Result{}, err
+		}
+
+		// Get the ClusterIP (it may not be assigned immediately on first creation)
+		if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
+			mdnsServiceIPs[fmt.Sprintf("mdns_address_%d", i)] = svc.Spec.ClusterIP
+			Log.Info(fmt.Sprintf("MDNS Service %s has ClusterIP %s", svcName, svc.Spec.ClusterIP))
+		} else {
+			Log.Info(fmt.Sprintf("Waiting for ClusterIP assignment for service %s", svcName))
+			// Requeue to wait for ClusterIP assignment
+			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		}
 	}
 
+	// Create Bind Services - can be 0 when BYOB is used
+	bindReplicaCount := int(*instance.Spec.DesignateBackendbind9.Replicas)
+	bindServiceIPs := make(map[string]string)
+	bindBaseName := fmt.Sprintf("%s-bind9", instance.Name)
+
+	for i := 0; i < bindReplicaCount; i++ {
+		podName := designate.BindPodName(bindBaseName, i)
+		svcName := designate.BindServiceName(bindBaseName, i)
+
+		svc := designate.PodService(svcName, instance.Namespace, bindLabels, podName, 53, "dns")
+
+		_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), svc, func() error {
+			svc.Labels = util.MergeStringMaps(svc.Labels, bindLabels)
+			return controllerutil.SetControllerReference(instance, svc, helper.GetScheme())
+		})
+		if err != nil {
+			Log.Error(err, fmt.Sprintf("Unable to create service %s for Bind pod %s", svcName, podName))
+			return ctrl.Result{}, err
+		}
+
+		// Get the ClusterIP
+		if svc.Spec.ClusterIP != "" && svc.Spec.ClusterIP != "None" {
+			bindServiceIPs[fmt.Sprintf("bind_address_%d", i)] = svc.Spec.ClusterIP
+			Log.Info(fmt.Sprintf("Bind Service %s has ClusterIP %s", svcName, svc.Spec.ClusterIP))
+		} else {
+			Log.Info(fmt.Sprintf("Waiting for ClusterIP assignment for service %s", svcName))
+			// Requeue to wait for ClusterIP assignment
+			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
+		}
+	}
+
+	Log.Info(fmt.Sprintf("Created %d MDNS services and %d Bind services", mdnsReplicaCount, bindReplicaCount))
+
+	// Get NS Records for pools.yaml
 	nsRecordsLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
 	nsRecords, err := r.getNSRecords(ctx, helper, instance, nsRecordsLabels)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-
-	allocatedIPs := make(map[string]bool)
-	for _, predIP := range bindConfigMap.Data {
-		allocatedIPs[predIP] = true
-	}
-	for _, predIP := range mdnsConfigMap.Data {
-		allocatedIPs[predIP] = true
-	}
-
-	// Handle Mdns predictable IPs configmap
-	// We cannot have 0 mDNS pods so even though the CRD validation allows 0, don't allow it.
-	mdnsReplicaCount := max(int(*instance.Spec.DesignateMdns.Replicas), 1)
-	var mdnsNames []string
-	for i := 0; i < mdnsReplicaCount; i++ {
-		mdnsNames = append(mdnsNames, fmt.Sprintf("mdns_address_%d", i))
-	}
-
-	updatedMap, allocatedIPs, err := r.allocatePredictableIPs(ctx, predictableIPParams, mdnsNames, mdnsConfigMap.Data, allocatedIPs)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), mdnsConfigMap, func() error {
-		mdnsConfigMap.Labels = util.MergeStringMaps(mdnsConfigMap.Labels, mdnsLabels)
-		mdnsConfigMap.Data = updatedMap
-		return controllerutil.SetControllerReference(instance, mdnsConfigMap, helper.GetScheme())
-	})
-
-	if err != nil {
-		Log.Info("Unable to create config map for mdns ips...")
-		return ctrl.Result{}, err
-	}
-
-	// Handle Bind predictable IPs configmap
-	// Unlike mDNS, we can have 0 binds when byob is used.
-	// NOTE(beagles) Really it might make more sense to have BYOB be an explicit flag and not assume that a 0
-	// value is a byob case. Something to think about.
-	bindReplicaCount := int(*instance.Spec.DesignateBackendbind9.Replicas)
-	var bindNames []string
-	for i := range bindReplicaCount {
-		bindNames = append(bindNames, fmt.Sprintf("bind_address_%d", i))
-	}
-
-	updatedBindMap, _, err := r.allocatePredictableIPs(ctx, predictableIPParams, bindNames, bindConfigMap.Data, allocatedIPs)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
-
-	Log.Info("Before creating bind configmap")
-
-	_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), bindConfigMap, func() error {
-		bindConfigMap.Labels = util.MergeStringMaps(bindConfigMap.Labels, bindLabels)
-		bindConfigMap.Data = updatedBindMap
-		return controllerutil.SetControllerReference(instance, bindConfigMap, helper.GetScheme())
-	})
-
-	if err != nil {
-		Log.Info("Unable to create config map for bind ips...")
-		return ctrl.Result{}, err
-	}
-
-	Log.Info("Bind configmap was created successfully")
 	if len(nsRecords) > 0 && instance.Status.DesignateCentralReadyCount > 0 {
 		Log.Info("NS records data found")
 		poolsYamlConfigMap := &corev1.ConfigMap{
@@ -909,7 +882,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			Data: make(map[string]string),
 		}
 
-		poolsYaml, poolsYamlHash, err := designate.GeneratePoolsYamlDataAndHash(bindConfigMap.Data, mdnsConfigMap.Data, nsRecords)
+		poolsYaml, poolsYamlHash, err := designate.GeneratePoolsYamlDataAndHash(bindServiceIPs, mdnsServiceIPs, nsRecords)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1276,41 +1249,6 @@ func (r *DesignateReconciler) handleConfigMap(ctx context.Context, helper *helpe
 	return nodeConfigMap, nil
 }
 
-func (r *DesignateReconciler) allocatePredictableIPs(ctx context.Context, predictableIPParams *designate.NADIpam, ipHolders []string, existingMap map[string]string, allocatedIPs map[string]bool) (map[string]string, map[string]bool, error) {
-	Log := r.GetLogger(ctx)
-
-	updatedMap := make(map[string]string)
-	var predictableIPsRequired []string
-
-	// First scan existing allocations so we can keep existing allocations.
-	// Keeping track of what's required and what already exists. If a node is
-	// removed from the cluster, it's IPs will not be added to the allocated
-	// list and are effectively recycled.
-	for _, ipHolder := range ipHolders {
-		if ipValue, ok := existingMap[ipHolder]; ok {
-			updatedMap[ipHolder] = ipValue
-			Log.Info(fmt.Sprintf("%s has IP mapping: %s", ipHolder, ipValue))
-		} else {
-			predictableIPsRequired = append(predictableIPsRequired, ipHolder)
-		}
-	}
-
-	// Get new IPs using the range from predictableIPParmas minus the
-	// allocatedIPs captured above.
-	Log.Info(fmt.Sprintf("Allocating %d predictable IPs", len(predictableIPsRequired)))
-	for _, nodeName := range predictableIPsRequired {
-		ipAddress, err := designate.GetNextIP(predictableIPParams, allocatedIPs)
-		if err != nil {
-			// An error here is really unexpected- it means either we have
-			// messed up the allocatedIPs list or the range we are assuming is
-			// too small for the number of mdns pod.
-			return nil, nil, err
-		}
-		updatedMap[nodeName] = ipAddress
-	}
-
-	return updatedMap, allocatedIPs, nil
-}
 
 func (r *DesignateReconciler) reconcileUpdate(ctx context.Context, instance *designatev1beta1.Designate) (ctrl.Result, error) {
 	Log := r.GetLogger(ctx)
