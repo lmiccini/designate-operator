@@ -29,9 +29,12 @@ type NetworkParameters struct {
 	ProviderAllocationEnd   netip.Addr
 }
 
-// NADConfig - IPAM parameters of the NAD
+// NADConfig - Network parameters of the NAD
+// Supports both bridge+whereabouts (ipam field) and ovn-k8s-cni-overlay (subnets field)
 type NADConfig struct {
-	IPAM NADIpam `json:"ipam"`
+	Type    string   `json:"type"`
+	IPAM    NADIpam  `json:"ipam"`
+	Subnets string   `json:"subnets"` // For OVN overlay: "192.168.88.0/24"
 }
 
 // NADIpam represents network attachment definition IPAM configuration
