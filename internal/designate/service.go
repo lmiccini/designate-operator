@@ -22,6 +22,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
+// ServicePort represents a port to expose on a Service
+type ServicePort struct {
+	Name string
+	Port int32
+}
+
 // PodService creates a ClusterIP Service for a specific pod in a StatefulSet
 // This provides a stable IP address for the pod that can be used in configuration
 func PodService(
@@ -29,13 +35,22 @@ func PodService(
 	namespace string,
 	labels map[string]string,
 	podName string,
-	port int32,
-	portName string,
+	ports []ServicePort,
 ) *corev1.Service {
 	// Create selector that matches the specific pod
 	// Only use statefulset.kubernetes.io/pod-name since it's unique and automatically set by K8s
 	selector := map[string]string{
 		"statefulset.kubernetes.io/pod-name": podName,
+	}
+
+	servicePorts := make([]corev1.ServicePort, len(ports))
+	for i, p := range ports {
+		servicePorts[i] = corev1.ServicePort{
+			Name:       p.Name,
+			Protocol:   corev1.ProtocolTCP,
+			Port:       p.Port,
+			TargetPort: intstr.FromInt(int(p.Port)),
+		}
 	}
 
 	return &corev1.Service{
@@ -45,16 +60,9 @@ func PodService(
 			Labels:    labels,
 		},
 		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
+			Type:     corev1.ServiceTypeClusterIP,
 			Selector: selector,
-			Ports: []corev1.ServicePort{
-				{
-					Name:       portName,
-					Protocol:   corev1.ProtocolTCP,
-					Port:       port,
-					TargetPort: intstr.FromInt(int(port)),
-				},
-			},
+			Ports:    servicePorts,
 		},
 	}
 }

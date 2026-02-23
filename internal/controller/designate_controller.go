@@ -810,7 +810,9 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		podName := designate.MdnsPodName(mdnsBaseName, i)
 		svcName := designate.MdnsServiceName(mdnsBaseName, i)
 
-		svc := designate.PodService(svcName, instance.Namespace, mdnsLabels, podName, 5354, "mdns")
+		svc := designate.PodService(svcName, instance.Namespace, mdnsLabels, podName, []designate.ServicePort{
+			{Name: "mdns", Port: 5354},
+		})
 
 		_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), svc, func() error {
 			svc.Labels = util.MergeStringMaps(svc.Labels, mdnsLabels)
@@ -841,7 +843,10 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		podName := designate.BindPodName(bindBaseName, i)
 		svcName := designate.BindServiceName(bindBaseName, i)
 
-		svc := designate.PodService(svcName, instance.Namespace, bindLabels, podName, 53, "dns")
+		svc := designate.PodService(svcName, instance.Namespace, bindLabels, podName, []designate.ServicePort{
+			{Name: "dns", Port: 53},
+			{Name: "rndc", Port: 953},
+		})
 
 		_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), svc, func() error {
 			svc.Labels = util.MergeStringMaps(svc.Labels, bindLabels)
