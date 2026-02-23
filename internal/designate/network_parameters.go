@@ -29,9 +29,12 @@ type NetworkParameters struct {
 	ProviderAllocationEnd   netip.Addr
 }
 
-// NADConfig - IPAM parameters of the NAD
+// NADConfig - Network parameters of the NAD
+// Supports both bridge+whereabouts (ipam field) and ovn-k8s-cni-overlay (subnets field)
 type NADConfig struct {
-	IPAM NADIpam `json:"ipam"`
+	Type    string   `json:"type"`
+	IPAM    NADIpam  `json:"ipam"`
+	Subnets string   `json:"subnets"` // For OVN overlay: "192.168.88.0/24"
 }
 
 // NADIpam represents network attachment definition IPAM configuration
@@ -42,6 +45,7 @@ type NADIpam struct {
 }
 
 // GetNADConfig parses and returns the NAD configuration from a NetworkAttachmentDefinition
+// Supports both bridge+whereabouts and ovn-k8s-cni-overlay NAD types
 func GetNADConfig(
 	nad *networkv1.NetworkAttachmentDefinition,
 ) (*NADConfig, error) {
@@ -54,7 +58,13 @@ func GetNADConfig(
 	return nadConfig, nil
 }
 
+// isOVNOverlay checks if the NAD is using ovn-k8s-cni-overlay
+func isOVNOverlay(nadConfig *NADConfig) bool {
+	return nadConfig.Type == "ovn-k8s-cni-overlay"
+}
+
 // GetNetworkParametersFromNAD - Extract network information from the Network Attachment Definition
+// Supports both bridge+whereabouts and ovn-k8s-cni-overlay NAD types (single subnet only)
 func GetNetworkParametersFromNAD(
 	nad *networkv1.NetworkAttachmentDefinition,
 ) (*NetworkParameters, error) {
@@ -65,16 +75,51 @@ func GetNetworkParametersFromNAD(
 		return nil, fmt.Errorf("cannot read network parameters: %w", err)
 	}
 
-	// Designate CIDR parameters
-	// These are the parameters for Designate's net/subnet
-	networkParameters.CIDR = nadConfig.IPAM.CIDR
+	var cidr netip.Prefix
+	var rangeEnd netip.Addr
 
-	// OpenShift allocates IP addresses from IPAM.RangeStart to IPAM.RangeEnd
-	// for the pods.
-	// We're going to use a range of 25 IP addresses that are assigned to
-	// the Neutron allocation pool, the range starts right after OpenShift
-	// RangeEnd.
-	networkParameters.ProviderAllocationStart = nadConfig.IPAM.RangeEnd.Next()
+	if isOVNOverlay(nadConfig) {
+		// OVN overlay format - parse subnet from "subnets" field
+		if nadConfig.Subnets == "" {
+			return nil, fmt.Errorf("OVN overlay NAD missing subnets field")
+		}
+
+		// Parse the subnet (single subnet only, no comma-separated lists)
+		cidr, err = netip.ParsePrefix(nadConfig.Subnets)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse OVN subnet %q: %w", nadConfig.Subnets, err)
+		}
+
+		// For OVN overlay, we don't have explicit range_start/range_end
+		// Reserve the upper portion of the subnet for predictable IPs
+		// For a /24 network, start predictable IPs at .200 (leaving .1-.199 for pod allocation)
+		addr := cidr.Addr()
+		rangeEnd = addr
+
+		// Try to start at .200 for /24 networks, or .30 for smaller subnets
+		targetOffset := 199
+		for i := 0; i < targetOffset; i++ {
+			rangeEnd = rangeEnd.Next()
+			if !cidr.Contains(rangeEnd) {
+				// Subnet too small for .200, fall back to .30
+				rangeEnd = addr
+				for j := 0; j < 29; j++ {
+					rangeEnd = rangeEnd.Next()
+				}
+				break
+			}
+		}
+	} else {
+		// Bridge + whereabouts format - use ipam fields
+		cidr = nadConfig.IPAM.CIDR
+		rangeEnd = nadConfig.IPAM.RangeEnd
+	}
+
+	networkParameters.CIDR = cidr
+
+	// Allocate IP addresses for predictable IPs (mdns and bind servers)
+	// The range starts right after the pod allocation range
+	networkParameters.ProviderAllocationStart = rangeEnd.Next()
 	end := networkParameters.ProviderAllocationStart
 	for range BindProvPredictablePoolSize {
 		if !networkParameters.CIDR.Contains(end) {
@@ -84,5 +129,5 @@ func GetNetworkParametersFromNAD(
 	}
 	networkParameters.ProviderAllocationEnd = end
 
-	return networkParameters, err
+	return networkParameters, nil
 }

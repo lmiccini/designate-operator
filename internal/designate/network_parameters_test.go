@@ -495,3 +495,111 @@ func TestNADConfig_StructFields(t *testing.T) {
 		t.Errorf("expected end %v, got %v", end, config.IPAM.RangeEnd)
 	}
 }
+
+func TestOVNOverlayNAD(t *testing.T) {
+	tests := []struct {
+		name                  string
+		nadConfig             string
+		expectError           bool
+		expectedCIDR          string
+		expectedProviderStart string
+		expectedProviderEnd   string
+	}{
+		{
+			name: "OVN overlay single subnet /24",
+			nadConfig: `{
+				"type": "ovn-k8s-cni-overlay",
+				"topology": "layer2",
+				"subnets": "192.168.88.0/24"
+			}`,
+			expectError:           false,
+			expectedCIDR:          "192.168.88.0/24",
+			expectedProviderStart: "192.168.88.200",
+			expectedProviderEnd:   "192.168.88.225",
+		},
+		{
+			name: "OVN overlay IPv6",
+			nadConfig: `{
+				"type": "ovn-k8s-cni-overlay",
+				"topology": "layer2",
+				"subnets": "2001:db8::/64"
+			}`,
+			expectError:           false,
+			expectedCIDR:          "2001:db8::/64",
+			expectedProviderStart: "2001:db8::c8",
+			expectedProviderEnd:   "2001:db8::e1",
+		},
+		{
+			name: "OVN overlay small subnet /28",
+			nadConfig: `{
+				"type": "ovn-k8s-cni-overlay",
+				"topology": "layer2",
+				"subnets": "10.0.0.0/28"
+			}`,
+			expectError: true, // Too small for 25 predictable IPs after .30
+		},
+		{
+			name: "OVN overlay missing subnets field",
+			nadConfig: `{
+				"type": "ovn-k8s-cni-overlay",
+				"topology": "layer2"
+			}`,
+			expectError: true,
+		},
+		{
+			name: "OVN overlay invalid subnet format",
+			nadConfig: `{
+				"type": "ovn-k8s-cni-overlay",
+				"topology": "layer2",
+				"subnets": "invalid-subnet"
+			}`,
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nad := &networkv1.NetworkAttachmentDefinition{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-nad",
+					Namespace: "test-namespace",
+				},
+				Spec: networkv1.NetworkAttachmentDefinitionSpec{
+					Config: tt.nadConfig,
+				},
+			}
+
+			params, err := GetNetworkParametersFromNAD(nad)
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none")
+				}
+				return
+			}
+
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+
+			// Check CIDR
+			expectedCIDR, _ := netip.ParsePrefix(tt.expectedCIDR)
+			if params.CIDR != expectedCIDR {
+				t.Errorf("expected CIDR %v, got %v", expectedCIDR, params.CIDR)
+			}
+
+			// Check provider allocation start
+			expectedStart, _ := netip.ParseAddr(tt.expectedProviderStart)
+			if params.ProviderAllocationStart != expectedStart {
+				t.Errorf("expected provider start %v, got %v", expectedStart, params.ProviderAllocationStart)
+			}
+
+			// Check provider allocation end
+			expectedEnd, _ := netip.ParseAddr(tt.expectedProviderEnd)
+			if params.ProviderAllocationEnd != expectedEnd {
+				t.Errorf("expected provider end %v, got %v", expectedEnd, params.ProviderAllocationEnd)
+			}
+		})
+	}
+}
