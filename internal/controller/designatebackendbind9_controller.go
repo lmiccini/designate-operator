@@ -18,6 +18,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -774,23 +775,61 @@ func (r *DesignateBackendbind9Reconciler) generateServiceConfigMaps(
 		return fmt.Errorf("%w: %s", designate.ErrNetworkAttachmentNotFound, instance.Spec.ControlNetworkName)
 	}
 
-	cidr := nadInfo.IPAM.CIDR.String()
-	if cidr == "" {
-		err := designate.ErrControlNetworkNotConfigured
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			condition.NetworkAttachmentsReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityError,
-			condition.NetworkAttachmentsReadyErrorMessage,
-			err))
-		return err
-	}
-	templateParameters := make(map[string]any)
-	if nadInfo.IPAM.CIDR.Addr().Is4() {
-		templateParameters["IPVersion"] = "4"
+	// Get CIDR based on NAD type (OVN overlay or bridge+whereabouts)
+	var cidr string
+	var ipVersion string
+
+	if nadInfo.Type == "ovn-k8s-cni-overlay" {
+		// OVN overlay format
+		if nadInfo.Subnets == "" {
+			err := designate.ErrControlNetworkNotConfigured
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.NetworkAttachmentsReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityError,
+				condition.NetworkAttachmentsReadyErrorMessage,
+				err))
+			return err
+		}
+		cidr = nadInfo.Subnets
+		// Parse to detect IP version
+		prefix, err := netip.ParsePrefix(nadInfo.Subnets)
+		if err != nil {
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.NetworkAttachmentsReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityError,
+				condition.NetworkAttachmentsReadyErrorMessage,
+				err.Error()))
+			return err
+		}
+		if prefix.Addr().Is4() {
+			ipVersion = "4"
+		} else {
+			ipVersion = "6"
+		}
 	} else {
-		templateParameters["IPVersion"] = "6"
+		// Bridge + whereabouts format
+		cidr = nadInfo.IPAM.CIDR.String()
+		if cidr == "" {
+			err := designate.ErrControlNetworkNotConfigured
+			instance.Status.Conditions.Set(condition.FalseCondition(
+				condition.NetworkAttachmentsReadyCondition,
+				condition.ErrorReason,
+				condition.SeverityError,
+				condition.NetworkAttachmentsReadyErrorMessage,
+				err))
+			return err
+		}
+		if nadInfo.IPAM.CIDR.Addr().Is4() {
+			ipVersion = "4"
+		} else {
+			ipVersion = "6"
+		}
 	}
+
+	templateParameters := make(map[string]any)
+	templateParameters["IPVersion"] = ipVersion
 	templateParameters["AllowCIDR"] = cidr
 	// This will need to be replaced by custom config for named.
 	templateParameters["EnableQueryLogging"] = false
