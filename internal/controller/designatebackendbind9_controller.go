@@ -476,16 +476,12 @@ func (r *DesignateBackendbind9Reconciler) reconcileNormal(ctx context.Context, i
 		return ctrl.Result{}, nil
 	}
 
-	bindIPsUpdated, err := r.hasMapChanged(ctx, helper, instance, designate.BindPredIPConfigMap, designate.BindPredictableIPHash)
-	if err != nil {
-		return ctrl.Result{}, err
-	}
 	rndcUpdate, err := r.hasSecretChanged(ctx, helper, instance, designate.DesignateBindKeySecret, designate.RndcHash)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if rndcUpdate || bindIPsUpdated {
-		// Predictable IPs and/or rndc keys have been updated, we need to update the statefulset.
+	if rndcUpdate {
+		// rndc keys have been updated, we need to update the statefulset.
 		return ctrl.Result{}, nil
 	}
 
