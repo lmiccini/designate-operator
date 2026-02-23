@@ -187,7 +187,6 @@ func StatefulSet(
 	envVars = map[string]env.Setter{}
 	envVars["POD_NAME"] = env.DownwardAPI("metadata.name")
 	envVars["CustomConf"] = env.SetValue(common.CustomServiceConfigFileName)
-	envVars["MAP_PREFIX"] = env.SetValue("bind_address_")
 	envVars["RNDC_PREFIX"] = env.SetValue(designate.DesignateRndcKey)
 	env := env.MergeEnvs([]corev1.EnvVar{}, envVars)
 	initContainerDetails := designate.InitContainerDetails{
@@ -195,16 +194,9 @@ func StatefulSet(
 		VolumeMounts:   getInitVolumeMounts(),
 		EnvVars:        env,
 	}
-	predIPContainerDetails := designate.PredIPContainerDetails{
-		ContainerImage: instance.Spec.NetUtilsImage,
-		VolumeMounts:   getPredIPVolumeMounts(),
-		EnvVars:        env,
-		Command:        designate.PredictableIPCommand,
-	}
 
 	statefulSet.Spec.Template.Spec.InitContainers = []corev1.Container{
 		designate.SimpleInitContainer(initContainerDetails),
-		designate.PredictableIPContainer(predIPContainerDetails),
 	}
 
 	return statefulSet, nil

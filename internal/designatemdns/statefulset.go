@@ -148,25 +148,13 @@ func StatefulSet(
 		)
 	}
 
-	envVars = map[string]env.Setter{}
-	envVars["POD_NAME"] = env.DownwardAPI("metadata.name")
-	envVars["MAP_PREFIX"] = env.SetValue("mdns_address_")
-	podEnv := env.MergeEnvs([]corev1.EnvVar{}, envVars)
 	initContainerDetails := designate.InitContainerDetails{
 		ContainerImage: instance.Spec.ContainerImage,
 		VolumeMounts:   initVolumeMounts,
-		EnvVars:        podEnv,
-	}
-	predIPContainerDetails := designate.PredIPContainerDetails{
-		ContainerImage: instance.Spec.NetUtilsImage,
-		VolumeMounts:   initVolumeMounts,
-		EnvVars:        podEnv,
-		Command:        designate.PredictableIPCommand,
 	}
 
 	statefulSet.Spec.Template.Spec.InitContainers = []corev1.Container{
 		designate.SimpleInitContainer(initContainerDetails),
-		designate.PredictableIPContainer(predIPContainerDetails),
 	}
 
 	return statefulSet
