@@ -82,7 +82,20 @@ func getCIDRsFromNADs(nadList []networkv1.NetworkAttachmentDefinition) ([]string
 		if err != nil {
 			return nil, err
 		}
-		cidrs = append(cidrs, nadConfig.IPAM.CIDR.String())
+
+		// Get CIDR based on NAD type (OVN overlay or bridge+whereabouts)
+		var cidr string
+		if nadConfig.Type == "ovn-k8s-cni-overlay" {
+			// OVN overlay format - use subnets field
+			cidr = nadConfig.Subnets
+		} else {
+			// Bridge + whereabouts format - use ipam field
+			cidr = nadConfig.IPAM.CIDR.String()
+		}
+
+		if cidr != "" {
+			cidrs = append(cidrs, cidr)
+		}
 	}
 	return cidrs, nil
 }
