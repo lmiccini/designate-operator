@@ -835,7 +835,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	// Create Bind Services - can be 0 when BYOB is used
 	bindReplicaCount := int(*instance.Spec.DesignateBackendbind9.Replicas)
 	bindServiceIPs := make(map[string]string)
-	bindBaseName := fmt.Sprintf("%s-bind9", instance.Name)
+	bindBaseName := fmt.Sprintf("%s-backendbind9", instance.Name)
 
 	for i := 0; i < bindReplicaCount; i++ {
 		podName := designate.BindPodName(bindBaseName, i)
