@@ -33,12 +33,10 @@ func PodService(
 	portName string,
 ) *corev1.Service {
 	// Create selector that matches the specific pod
-	// StatefulSets use statefulset.kubernetes.io/pod-name label
-	selector := make(map[string]string)
-	for k, v := range labels {
-		selector[k] = v
+	// Only use statefulset.kubernetes.io/pod-name since it's unique and automatically set by K8s
+	selector := map[string]string{
+		"statefulset.kubernetes.io/pod-name": podName,
 	}
-	selector["statefulset.kubernetes.io/pod-name"] = podName
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
