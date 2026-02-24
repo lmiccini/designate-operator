@@ -24,8 +24,9 @@ import (
 
 // ServicePort represents a port to expose on a Service
 type ServicePort struct {
-	Name string
-	Port int32
+	Name     string
+	Port     int32
+	Protocol corev1.Protocol
 }
 
 // PodService creates a ClusterIP Service for a specific pod in a StatefulSet
@@ -45,9 +46,13 @@ func PodService(
 
 	servicePorts := make([]corev1.ServicePort, len(ports))
 	for i, p := range ports {
+		protocol := p.Protocol
+		if protocol == "" {
+			protocol = corev1.ProtocolTCP
+		}
 		servicePorts[i] = corev1.ServicePort{
 			Name:       p.Name,
-			Protocol:   corev1.ProtocolTCP,
+			Protocol:   protocol,
 			Port:       p.Port,
 			TargetPort: intstr.FromInt(int(p.Port)),
 		}

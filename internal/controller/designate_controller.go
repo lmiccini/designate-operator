@@ -811,7 +811,8 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		svcName := designate.MdnsServiceName(mdnsBaseName, i)
 
 		svc := designate.PodService(svcName, instance.Namespace, mdnsLabels, podName, []designate.ServicePort{
-			{Name: "mdns", Port: 5354},
+			{Name: "mdns-tcp", Port: 5354, Protocol: corev1.ProtocolTCP},
+			{Name: "mdns-udp", Port: 5354, Protocol: corev1.ProtocolUDP},
 		})
 
 		_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), svc, func() error {
@@ -844,8 +845,9 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		svcName := designate.BindServiceName(bindBaseName, i)
 
 		svc := designate.PodService(svcName, instance.Namespace, bindLabels, podName, []designate.ServicePort{
-			{Name: "dns", Port: 53},
-			{Name: "rndc", Port: 953},
+			{Name: "dns-tcp", Port: 53, Protocol: corev1.ProtocolTCP},
+			{Name: "dns-udp", Port: 53, Protocol: corev1.ProtocolUDP},
+			{Name: "rndc", Port: 953, Protocol: corev1.ProtocolTCP},
 		})
 
 		_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), svc, func() error {
