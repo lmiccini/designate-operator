@@ -754,6 +754,12 @@ func (r *DesignateWorkerReconciler) reconcileNormal(ctx context.Context, instanc
 				condition.SeverityInfo,
 				condition.DeploymentReadyRunningMessage))
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
 	// create Deployment - end
 

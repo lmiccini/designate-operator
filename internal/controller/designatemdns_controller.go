@@ -767,6 +767,12 @@ func (r *DesignateMdnsReconciler) reconcileNormal(ctx context.Context, instance 
 				condition.SeverityInfo,
 				condition.DeploymentReadyRunningMessage))
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
 	// create StatefulSet - end
 

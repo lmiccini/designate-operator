@@ -724,6 +724,12 @@ func (r *DesignateBackendbind9Reconciler) reconcileSingleStatefulSet(
 				condition.SeverityInfo,
 				condition.DeploymentReadyRunningMessage))
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
 
 	// Handle pod labeling for predictable IPs only when statefulset is ready

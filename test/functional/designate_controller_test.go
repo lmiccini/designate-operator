@@ -1340,6 +1340,92 @@ var _ = Describe("Designate controller", func() {
 		})
 	})
 
+	When("TransportURL consumer finalizer is managed", func() {
+		BeforeEach(func() {
+			createAndSimulateKeystone(designateName)
+			createAndSimulateRedis(designateRedisName)
+			createAndSimulateDesignateSecrets(designateName)
+			createAndSimulateTransportURL(transportURLName, transportURLSecretName)
+			createAndSimulateDB(spec)
+			DeferCleanup(k8sClient.Delete, ctx, CreateNAD(types.NamespacedName{
+				Name:      spec["designateNetworkAttachment"].(string),
+				Namespace: namespace,
+			}))
+			DeferCleanup(th.DeleteInstance, CreateDesignate(designateName, spec))
+			th.SimulateJobSuccess(designateDBSyncName)
+		})
+
+		It("should add the consumer finalizer to the transport secret", func() {
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should remove the consumer finalizer from transport secret on CR deletion", func() {
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			th.DeleteInstance(GetDesignate(designateName))
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).NotTo(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should move the finalizer from the old to the new secret on transport rotation", func() {
+			oldSecretName := RabbitmqSecretName
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			newSecretName := "rabbitmq-secret-rotated"
+			newSecret := th.CreateSecret(
+				types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				},
+				map[string][]byte{
+					"transport_url": []byte("rabbit://rotated-user:rotated-pass@rabbitmq/fake"),
+				},
+			)
+			DeferCleanup(k8sClient.Delete, ctx, newSecret)
+
+			Eventually(func(g Gomega) {
+				transport := infra.GetTransportURL(transportURLName)
+				transport.Status.SecretName = newSecretName
+				g.Expect(k8sClient.Status().Update(ctx, transport)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				})
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			Consistently(func(g Gomega) {
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      oldSecretName,
+				})
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+		})
+	})
+
 	When("Designate starts with notifications enabled and then disables them", func() {
 		var notificationsTransportURLName types.NamespacedName
 		var notificationsTransportURLSecretName types.NamespacedName
