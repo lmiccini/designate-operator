@@ -1017,7 +1017,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	Log.Info("Reconcile tasks starting....")
 
 	// deploy designate-api
-	designateAPI, op, err := r.apiDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
+	designateAPI, opAPI, err := r.apiDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateAPIReadyCondition,
@@ -1040,8 +1040,8 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opAPI != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opAPI)))
 	}
 	Log.Info("Deployment API task reconciled")
 
@@ -1319,7 +1319,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	}
 
 	// deploy designate-central
-	designateCentral, op, err := r.centralDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
+	designateCentral, opCentral, err := r.centralDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateCentralReadyCondition,
@@ -1342,13 +1342,13 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opCentral != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opCentral)))
 	}
 	Log.Info("Deployment Central task reconciled")
 
 	// deploy designate-worker
-	designateWorker, op, err := r.workerDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
+	designateWorker, opWorker, err := r.workerDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateWorkerReadyCondition,
@@ -1371,13 +1371,13 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opWorker != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opWorker)))
 	}
 	Log.Info("Deployment Worker task reconciled")
 
 	// deploy designate-mdns
-	designateMdns, op, err := r.mdnsStatefulSetCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
+	designateMdns, opMdns, err := r.mdnsStatefulSetCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateMdnsReadyCondition,
@@ -1400,13 +1400,13 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opMdns != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opMdns)))
 	}
 	Log.Info("Deployment Mdns task reconciled")
 
 	// deploy designate-producer
-	designateProducer, op, err := r.producerDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
+	designateProducer, opProducer, err := r.producerDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateProducerReadyCondition,
@@ -1429,13 +1429,13 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opProducer != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opProducer)))
 	}
 	Log.Info("Deployment Producer task reconciled")
 
 	// deploy designate-backendbind9
-	designateBackendbind9, op, err := r.backendbind9StatefulSetCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
+	designateBackendbind9, opBind9, err := r.backendbind9StatefulSetCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateBackendbind9ReadyCondition,
@@ -1458,13 +1458,13 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opBind9 != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opBind9)))
 	}
 	Log.Info("Deployment Backendbind9 task reconciled")
 
 	// deploy the unbound reconcilier if necessary
-	designateUnbound, op, err := r.unboundStatefulSetCreateOrUpdate(ctx, instance)
+	designateUnbound, opUnbound, err := r.unboundStatefulSetCreateOrUpdate(ctx, instance)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateUnboundReadyCondition,
@@ -1487,8 +1487,8 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opUnbound != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opUnbound)))
 	}
 	Log.Info("Deployment Unbound task reconciled")
 
@@ -1498,44 +1498,40 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		return ctrl.Result{}, err
 	}
 
-	// Transport secret rotation guard: only release the old secret's
-	// consumer finalizer after all services have rolled with the new
-	// credentials.
-	isTransportRotation := instance.Status.TransportURLSecret != "" &&
-		instance.Status.TransportURLSecret != transportURL.Status.SecretName
-	if isTransportRotation {
-		if instance.Status.Conditions.AllSubConditionIsTrue() {
-			if err := rabbitmqv1.RemoveTransportSecretConsumerFinalizer(
-				ctx, helper, instance.Namespace,
-				instance.Status.TransportURLSecret,
-				designate.TransportConsumerFinalizer,
-			); err != nil {
-				return ctrl.Result{}, err
-			}
-			instance.Status.TransportURLSecret = transportURL.Status.SecretName
-		}
-	} else {
-		instance.Status.TransportURLSecret = transportURL.Status.SecretName
-	}
+	allSubCRsStable := opAPI == controllerutil.OperationResultNone &&
+		opCentral == controllerutil.OperationResultNone &&
+		opWorker == controllerutil.OperationResultNone &&
+		opMdns == controllerutil.OperationResultNone &&
+		opProducer == controllerutil.OperationResultNone &&
+		opBind9 == controllerutil.OperationResultNone &&
+		opUnbound == controllerutil.OperationResultNone
 
-	// Notifications transport secret rotation guard
+	guardReady := allSubCRsStable && instance.Status.Conditions.AllSubConditionIsTrue()
+
+	secretName, err := rabbitmqv1.FinalizeTransportSecretRotation(
+		ctx, helper, instance.Namespace,
+		instance.Status.TransportURLSecret,
+		transportURL.Status.SecretName,
+		designate.TransportConsumerFinalizer,
+		guardReady,
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	instance.Status.TransportURLSecret = secretName
+
 	if newNotificationsSecret != "" {
-		isNotifRotation := instance.Status.NotificationsTransportURLSecret != "" &&
-			instance.Status.NotificationsTransportURLSecret != newNotificationsSecret
-		if isNotifRotation {
-			if instance.Status.Conditions.AllSubConditionIsTrue() {
-				if err := rabbitmqv1.RemoveTransportSecretConsumerFinalizer(
-					ctx, helper, instance.Namespace,
-					instance.Status.NotificationsTransportURLSecret,
-					designate.TransportConsumerFinalizer,
-				); err != nil {
-					return ctrl.Result{}, err
-				}
-				instance.Status.NotificationsTransportURLSecret = newNotificationsSecret
-			}
-		} else {
-			instance.Status.NotificationsTransportURLSecret = newNotificationsSecret
+		notifSecretName, err := rabbitmqv1.FinalizeTransportSecretRotation(
+			ctx, helper, instance.Namespace,
+			instance.Status.NotificationsTransportURLSecret,
+			newNotificationsSecret,
+			designate.TransportConsumerFinalizer,
+			guardReady,
+		)
+		if err != nil {
+			return ctrl.Result{}, err
 		}
+		instance.Status.NotificationsTransportURLSecret = notifSecretName
 	}
 
 	// We reached the end of the Reconcile, update the Ready condition based on
