@@ -54,6 +54,9 @@ const (
 	// BindPredIPConfigMap is the name of the ConfigMap containing bind predictable IP mappings
 	BindPredIPConfigMap = "designate-bind-ip-map"
 
+	// UnboundPredIPConfigMap is the name of the ConfigMap containing Unbound predictable IP mappings
+	UnboundPredIPConfigMap = "designate-unbound-ip-map"
+
 	// RndcConfDir is the directory path for RNDC configuration files
 	RndcConfDir = "/etc/designate/rndc-keys"
 
@@ -104,6 +107,10 @@ const (
 
 	// ACConsumerFinalizer is added to AC secrets that designate is actively consuming
 	ACConsumerFinalizer = "openstack.org/designateapi-ac-consumer"
+
+	// TransportConsumerFinalizer is added to transport secrets that designate is
+	// actively consuming, preventing premature deletion during credential rotation
+	TransportConsumerFinalizer = "openstack.org/designate-transport-consumer"
 
 	// ExternalBindsData is the name of the secret containing external BIND9 configurations
 	ExternalBindsData = "designate-external-binds"

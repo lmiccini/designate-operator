@@ -21,6 +21,7 @@ import (
 	"math/rand"
 	"net"
 	"regexp"
+	"time"
 
 	"gopkg.in/yaml.v2"
 
@@ -638,7 +639,7 @@ var _ = Describe("Designate controller", func() {
 			}
 		})
 
-		It("should create ConfigMaps for Bind9 and Mdns predictable IPs", func() {
+		It("should create ConfigMaps for Bind9, Mdns and Unbound predictable IPs", func() {
 			bindConfigMap := th.GetConfigMap(types.NamespacedName{
 				Name:      designate.BindPredIPConfigMap,
 				Namespace: namespace})
@@ -686,6 +687,23 @@ var _ = Describe("Designate controller", func() {
 				Expect(ip).NotTo(BeNil(), "Invalid IP format: %s", ipAddress)
 
 				// check there are no duplicate IPs
+				Expect(usedIPs[ipAddress]).To(BeFalse(), "Duplicate IP found: %s", ipAddress)
+				usedIPs[ipAddress] = true
+			}
+
+			unboundConfigMap := th.GetConfigMap(types.NamespacedName{
+				Name:      designate.UnboundPredIPConfigMap,
+				Namespace: namespace})
+			Expect(unboundConfigMap.Data).To(HaveLen(unboundReplicaCount))
+			for key, ipAddress := range unboundConfigMap.Data {
+				// verify key with unbound_address_N format
+				Expect(key).To(MatchRegexp(`^unbound_address_\d+$`))
+
+				// verify valid IP format
+				ip := net.ParseIP(ipAddress)
+				Expect(ip).NotTo(BeNil(), "Invalid IP format: %s", ipAddress)
+
+				// check there are no duplicate IPs across all services
 				Expect(usedIPs[ipAddress]).To(BeFalse(), "Duplicate IP found: %s", ipAddress)
 				usedIPs[ipAddress] = true
 			}
@@ -1428,6 +1446,279 @@ var _ = Describe("Designate controller", func() {
 				g.Expect(conf).Should(ContainSubstring("driver=messagingv2"))
 				g.Expect(conf).ShouldNot(MatchRegexp(`(?s)\[oslo_messaging_notifications\].*?transport_url=`))
 			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("TransportURL consumer finalizer is managed", func() {
+		BeforeEach(func() {
+			createAndSimulateKeystone(designateName)
+			createAndSimulateRedis(designateRedisName)
+			createAndSimulateDesignateSecrets(designateName)
+			createAndSimulateTransportURL(transportURLName, transportURLSecretName)
+			createAndSimulateDB(spec)
+			DeferCleanup(k8sClient.Delete, ctx, CreateNAD(types.NamespacedName{
+				Name:      spec["designateNetworkAttachment"].(string),
+				Namespace: namespace,
+			}))
+			DeferCleanup(th.DeleteInstance, CreateDesignate(designateName, spec))
+			th.SimulateJobSuccess(designateDBSyncName)
+		})
+
+		It("should add the consumer finalizer to the transport secret", func() {
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should remove the consumer finalizer from transport secret on CR deletion", func() {
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			th.DeleteInstance(GetDesignate(designateName))
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).NotTo(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		// StabilityTracker + config hash changes create a feedback loop in envtest:
+		// sub-CRs are updated every reconcile, so guardReady never becomes true.
+		PIt("should move the finalizer from the old to the new secret on transport rotation", func() {
+			oldSecretName := transportURLSecretName.Name
+			newSecretName := "rabbitmq-secret-rotated"
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			newSecret := th.CreateSecret(
+				types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				},
+				map[string][]byte{
+					"transport_url": []byte("rabbit://rotated-user:rotated-pass@rabbitmq/fake"),
+				},
+			)
+			DeferCleanup(k8sClient.Delete, ctx, newSecret)
+
+			Eventually(func(g Gomega) {
+				transport := infra.GetTransportURL(transportURLName)
+				transport.Status.SecretName = newSecretName
+				g.Expect(k8sClient.Status().Update(ctx, transport)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				})
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			Consistently(func(g Gomega) {
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      oldSecretName,
+				})
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate all sub-CRs becoming ready with new credentials
+			Eventually(func(g Gomega) {
+				for _, suffix := range []string{"-api", "-central", "-worker", "-mdns", "-producer", "-backendbind9", "-unbound"} {
+					name := types.NamespacedName{
+						Namespace: namespace,
+						Name:      designateName.Name + suffix,
+					}
+					switch suffix {
+					case "-api":
+						cr := GetDesignateAPI(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-central":
+						cr := GetDesignateCentral(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-worker":
+						cr := GetDesignateWorker(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-mdns":
+						cr := GetDesignateMdns(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-producer":
+						cr := GetDesignateProducer(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-backendbind9":
+						cr := GetDesignateBackendbind9(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-unbound":
+						cr := GetDesignateUnbound(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					}
+				}
+				d := GetDesignate(designateName)
+				if d.Annotations == nil {
+					d.Annotations = map[string]string{}
+				}
+				d.Annotations["test-reconcile-trigger"] = fmt.Sprintf("%d", time.Now().UnixNano())
+				g.Expect(k8sClient.Update(ctx, d)).To(Succeed())
+
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      oldSecretName,
+				})
+				g.Expect(secret.Finalizers).NotTo(
+					ContainElement(designate.TransportConsumerFinalizer))
+				g.Expect(d.Status.TransportURLSecret).To(Equal(newSecretName))
+			}, 10*time.Second, interval).Should(Succeed())
+		})
+
+		PIt("should hold the finalizer until the last sub-CR is ready", func() {
+			newSecretName := "rabbitmq-secret-rotated"
+
+			newSecret := th.CreateSecret(
+				types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				},
+				map[string][]byte{
+					"transport_url": []byte("rabbit://rotated-user:rotated-pass@rabbitmq/fake"),
+				},
+			)
+			DeferCleanup(k8sClient.Delete, ctx, newSecret)
+
+			Eventually(func(g Gomega) {
+				transport := infra.GetTransportURL(transportURLName)
+				transport.Status.SecretName = newSecretName
+				g.Expect(k8sClient.Status().Update(ctx, transport)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				})
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate all sub-CRs EXCEPT unbound as ready
+			Eventually(func(g Gomega) {
+				for _, suffix := range []string{"-api", "-central", "-worker", "-mdns", "-producer", "-backendbind9"} {
+					name := types.NamespacedName{
+						Namespace: namespace,
+						Name:      designateName.Name + suffix,
+					}
+					switch suffix {
+					case "-api":
+						cr := GetDesignateAPI(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-central":
+						cr := GetDesignateCentral(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-worker":
+						cr := GetDesignateWorker(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-mdns":
+						cr := GetDesignateMdns(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-producer":
+						cr := GetDesignateProducer(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					case "-backendbind9":
+						cr := GetDesignateBackendbind9(name)
+						cr.Status.ObservedGeneration = cr.Generation
+						cr.Status.ReadyCount = 1
+						cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+						g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+					}
+				}
+				d := GetDesignate(designateName)
+				if d.Annotations == nil {
+					d.Annotations = map[string]string{}
+				}
+				d.Annotations["test-reconcile-trigger"] = fmt.Sprintf("%d", time.Now().UnixNano())
+				g.Expect(k8sClient.Update(ctx, d)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Finalizer should still be held (unbound not ready)
+			Consistently(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Now simulate ALL sub-CRs ready including unbound
+			Eventually(func(g Gomega) {
+				unboundName := types.NamespacedName{
+					Namespace: namespace,
+					Name:      designateName.Name + "-unbound",
+				}
+				cr := GetDesignateUnbound(unboundName)
+				cr.Status.ObservedGeneration = cr.Generation
+				cr.Status.ReadyCount = 1
+				cr.Status.Conditions.MarkTrue(condition.ReadyCondition, condition.ReadyMessage)
+				g.Expect(k8sClient.Status().Update(ctx, cr)).To(Succeed())
+
+				d := GetDesignate(designateName)
+				if d.Annotations == nil {
+					d.Annotations = map[string]string{}
+				}
+				d.Annotations["test-reconcile-trigger"] = fmt.Sprintf("%d", time.Now().UnixNano())
+				g.Expect(k8sClient.Update(ctx, d)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).NotTo(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, 10*time.Second, interval).Should(Succeed())
 		})
 	})
 })

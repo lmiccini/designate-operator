@@ -51,6 +51,7 @@ import (
 	"github.com/openstack-k8s-operators/lib-common/modules/common/job"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/labels"
 	nad "github.com/openstack-k8s-operators/lib-common/modules/common/networkattachment"
+	"github.com/openstack-k8s-operators/lib-common/modules/common/object"
 	common_rbac "github.com/openstack-k8s-operators/lib-common/modules/common/rbac"
 	oko_secret "github.com/openstack-k8s-operators/lib-common/modules/common/secret"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/tls"
@@ -134,8 +135,8 @@ func (r *DesignateReconciler) GetScheme() *runtime.Scheme {
 // DesignateReconciler reconciles a Designate object
 type DesignateReconciler struct {
 	client.Client
-	Kclient kubernetes.Interface
-	Scheme  *runtime.Scheme
+	Kclient   kubernetes.Interface
+	Scheme    *runtime.Scheme
 }
 
 // validatePoolRemovals checks if any pools have been removed from the multipool config
@@ -617,8 +618,16 @@ func (r *DesignateReconciler) reconcileDelete(ctx context.Context, instance *des
 		}
 	}
 
-	// TODO: We might need to control how the sub-services (API, Backup, Scheduler and Volumes) are
-	// deleted (when their parent Designate CR is deleted) once we further develop their functionality
+	// Remove consumer finalizer from transport secrets designate was consuming.
+	for _, secretName := range []string{
+		instance.Status.TransportURLSecret,
+		instance.Status.NotificationsTransportURLSecret,
+	} {
+		if err := object.RemoveSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+			secretName, designate.TransportConsumerFinalizer); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
 
 	// Service is deleted so remove the finalizer.
 	controllerutil.RemoveFinalizer(instance, helper.GetFinalizer())
@@ -872,9 +881,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		Log.Info(fmt.Sprintf("TransportURL %s successfully reconciled - operation: %s", transportURL.Name, string(op)))
 	}
 
-	instance.Status.TransportURLSecret = transportURL.Status.SecretName
-
-	if instance.Status.TransportURLSecret == "" {
+	if transportURL.Status.SecretName == "" {
 		Log.Info(fmt.Sprintf("Waiting for TransportURL %s secret to be created", transportURL.Name))
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			condition.InputReadyCondition,
@@ -882,6 +889,19 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			condition.SeverityInfo,
 			condition.InputReadyWaitingMessage))
 		return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+	}
+
+	// Set status early for first-time setup so PatchInstance persists it
+	// even on early returns. During rotation (old != current), the status
+	// is only updated by FinalizeSecretRotation at end of reconcile.
+	if instance.Status.TransportURLSecret == "" ||
+		instance.Status.TransportURLSecret == transportURL.Status.SecretName {
+		instance.Status.TransportURLSecret = transportURL.Status.SecretName
+	}
+
+	if err := object.ManageSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+		transportURL.Status.SecretName, designate.TransportConsumerFinalizer); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	instance.Status.Conditions.MarkTrue(
@@ -893,8 +913,10 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	//
 	// create RabbitMQ notifications transportURL CR if NotificationsBus is configured
 	//
+	var notificationsTransportURL *rabbitmqv1.TransportURL
 	if instance.Spec.NotificationsBus != nil {
-		notificationsTransportURL, op, err := r.notificationsTransportURLCreateOrUpdate(ctx, instance)
+		var notifOp controllerutil.OperationResult
+		notificationsTransportURL, notifOp, err = r.notificationsTransportURLCreateOrUpdate(ctx, instance)
 		if err != nil {
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				designatev1beta1.DesignateRabbitMqNotificationsTransportURLReadyCondition,
@@ -905,13 +927,11 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			return ctrl.Result{}, err
 		}
 
-		if op != controllerutil.OperationResultNone {
-			Log.Info(fmt.Sprintf("Notifications TransportURL %s successfully reconciled - operation: %s", notificationsTransportURL.Name, string(op)))
+		if notifOp != controllerutil.OperationResultNone {
+			Log.Info(fmt.Sprintf("Notifications TransportURL %s successfully reconciled - operation: %s", notificationsTransportURL.Name, string(notifOp)))
 		}
 
-		instance.Status.NotificationsTransportURLSecret = notificationsTransportURL.Status.SecretName
-
-		if instance.Status.NotificationsTransportURLSecret == "" {
+		if notificationsTransportURL.Status.SecretName == "" {
 			Log.Info(fmt.Sprintf("Waiting for Notifications TransportURL %s secret to be created", notificationsTransportURL.Name))
 			instance.Status.Conditions.Set(condition.FalseCondition(
 				condition.InputReadyCondition,
@@ -919,6 +939,19 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 				condition.SeverityInfo,
 				condition.InputReadyWaitingMessage))
 			return ctrl.Result{RequeueAfter: time.Duration(10) * time.Second}, nil
+		}
+
+		// Set status early for first-time setup so PatchInstance persists it
+		// even on early returns. During rotation (old != current), the status
+		// is only updated by FinalizeSecretRotation at end of reconcile.
+		if instance.Status.NotificationsTransportURLSecret == "" ||
+			instance.Status.NotificationsTransportURLSecret == notificationsTransportURL.Status.SecretName {
+			instance.Status.NotificationsTransportURLSecret = notificationsTransportURL.Status.SecretName
+		}
+
+		if err := object.ManageSecretConsumerFinalizer(ctx, helper, instance.Namespace,
+			notificationsTransportURL.Status.SecretName, designate.TransportConsumerFinalizer); err != nil {
+			return ctrl.Result{}, err
 		}
 
 		instance.Status.Conditions.MarkTrue(
@@ -974,8 +1007,9 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	//
 	Log.Info("Reconcile tasks starting....")
 
+
 	// deploy designate-api
-	designateAPI, op, err := r.apiDeploymentCreateOrUpdate(ctx, instance)
+	designateAPI, opAPI, err := r.apiDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateAPIReadyCondition,
@@ -985,34 +1019,21 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			err.Error()))
 		return ctrl.Result{}, err
 	}
-	apiObsGen, err := r.checkDesignateAPIGeneration(instance)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			designatev1beta1.DesignateAPIReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			designatev1beta1.DesignateAPIReadyErrorMessage,
-			err.Error()))
-		return ctrlResult, nil
-	}
-	if !apiObsGen {
-		instance.Status.Conditions.Set(condition.UnknownCondition(
-			designatev1beta1.DesignateAPIReadyCondition,
-			condition.InitReason,
-			designatev1beta1.DesignateAPIReadyInitMessage,
-		))
-	} else {
-		// Mirror DesignateAPI status' ReadyCount to this parent CR
+	if designateAPI.Generation == designateAPI.Status.ObservedGeneration {
 		instance.Status.DesignateAPIReadyCount = designateAPI.Status.ReadyCount
-		// Mirror DesignateAPI's condition status
 		c := designateAPI.Status.Conditions.Mirror(designatev1beta1.DesignateAPIReadyCondition)
 		if c != nil {
 			instance.Status.Conditions.Set(c)
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			designatev1beta1.DesignateAPIReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
-
-	if op != controllerutil.OperationResultNone && apiObsGen {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opAPI != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opAPI)))
 	}
 	Log.Info("Deployment API task reconciled")
 
@@ -1172,12 +1193,22 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		return ctrl.Result{}, err
 	}
 
+	// Handle Unbound predictable IPs configmap
+	unboundLabels := labels.GetLabels(instance, labels.GetGroupLabel(instance.Name), map[string]string{})
+	unboundConfigMap, err := r.handleConfigMap(ctx, helper, instance, designate.UnboundPredIPConfigMap, unboundLabels)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	allocatedIPs := make(map[string]bool)
 	for _, key := range slices.Sorted(maps.Keys(bindConfigMap.Data)) {
 		allocatedIPs[bindConfigMap.Data[key]] = true
 	}
 	for _, key := range slices.Sorted(maps.Keys(mdnsConfigMap.Data)) {
 		allocatedIPs[mdnsConfigMap.Data[key]] = true
+	}
+	for _, key := range slices.Sorted(maps.Keys(unboundConfigMap.Data)) {
+		allocatedIPs[unboundConfigMap.Data[key]] = true
 	}
 
 	// Handle Mdns predictable IPs configmap
@@ -1221,7 +1252,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		bindNames = append(bindNames, fmt.Sprintf("bind_address_%d", i))
 	}
 
-	updatedBindMap, _, err := r.allocatePredictableIPs(ctx, predictableIPParams, bindNames, bindConfigMap.Data, allocatedIPs)
+	updatedBindMap, allocatedIPs, err := r.allocatePredictableIPs(ctx, predictableIPParams, bindNames, bindConfigMap.Data, allocatedIPs)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -1230,6 +1261,27 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	ctrlResult, err = r.reconcileBindConfigMaps(ctx, instance, helper, multipoolConfig, updatedBindMap, bindLabels)
 	if err != nil || (ctrlResult != ctrl.Result{}) {
 		return ctrlResult, err
+	}
+
+	unboundReplicaCount := int(*instance.Spec.DesignateUnbound.Replicas)
+	var unboundNames []string
+	for i := 0; i < unboundReplicaCount; i++ {
+		unboundNames = append(unboundNames, fmt.Sprintf("unbound_address_%d", i))
+	}
+
+	updatedUnboundMap, _, err := r.allocatePredictableIPs(ctx, predictableIPParams, unboundNames, unboundConfigMap.Data, allocatedIPs)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	_, err = controllerutil.CreateOrPatch(ctx, helper.GetClient(), unboundConfigMap, func() error {
+		unboundConfigMap.Labels = util.MergeStringMaps(unboundConfigMap.Labels, unboundLabels)
+		unboundConfigMap.Data = updatedUnboundMap
+		return controllerutil.SetControllerReference(instance, unboundConfigMap, helper.GetScheme())
+	})
+	if err != nil {
+		Log.Info("Unable to create config map for unbound ips...")
+		return ctrl.Result{}, err
 	}
 
 	if len(nsRecords) > 0 && instance.Status.DesignateCentralReadyCount > 0 {
@@ -1290,7 +1342,7 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 	}
 
 	// deploy designate-central
-	designateCentral, op, err := r.centralDeploymentCreateOrUpdate(ctx, instance)
+	designateCentral, opCentral, err := r.centralDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateCentralReadyCondition,
@@ -1300,39 +1352,26 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			err.Error()))
 		return ctrl.Result{}, err
 	}
-	ctrObsGen, err := r.checkDesignateCentralGeneration(instance)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			designatev1beta1.DesignateCentralReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			designatev1beta1.DesignateCentralReadyErrorMessage,
-			err.Error()))
-		return ctrlResult, nil
-	}
-	if !ctrObsGen {
-		instance.Status.Conditions.Set(condition.UnknownCondition(
-			designatev1beta1.DesignateCentralReadyCondition,
-			condition.InitReason,
-			designatev1beta1.DesignateCentralReadyInitMessage,
-		))
-	} else {
-		// Mirror DesignateCentral status' ReadyCount to this parent CR
+	if designateCentral.Generation == designateCentral.Status.ObservedGeneration {
 		instance.Status.DesignateCentralReadyCount = designateCentral.Status.ReadyCount
-		// Mirror DesignateCentral's condition status
 		c := designateCentral.Status.Conditions.Mirror(designatev1beta1.DesignateCentralReadyCondition)
 		if c != nil {
 			instance.Status.Conditions.Set(c)
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			designatev1beta1.DesignateCentralReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone && ctrObsGen {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opCentral != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opCentral)))
 	}
-
 	Log.Info("Deployment Central task reconciled")
 
 	// deploy designate-worker
-	designateWorker, op, err := r.workerDeploymentCreateOrUpdate(ctx, instance)
+	designateWorker, opWorker, err := r.workerDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateWorkerReadyCondition,
@@ -1342,38 +1381,26 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			err.Error()))
 		return ctrl.Result{}, err
 	}
-	workerObsGen, err := r.checkDesignateWorkerGeneration(instance)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			designatev1beta1.DesignateWorkerReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			designatev1beta1.DesignateWorkerReadyErrorMessage,
-			err.Error()))
-		return ctrlResult, nil
-	}
-	if !workerObsGen {
-		instance.Status.Conditions.Set(condition.UnknownCondition(
-			designatev1beta1.DesignateWorkerReadyCondition,
-			condition.InitReason,
-			designatev1beta1.DesignateWorkerReadyInitMessage,
-		))
-	} else {
-		// Mirror DesignateWorker status' ReadyCount to this parent CR
+	if designateWorker.Generation == designateWorker.Status.ObservedGeneration {
 		instance.Status.DesignateWorkerReadyCount = designateWorker.Status.ReadyCount
-		// Mirror DesignateWorker's condition status
 		c := designateWorker.Status.Conditions.Mirror(designatev1beta1.DesignateWorkerReadyCondition)
 		if c != nil {
 			instance.Status.Conditions.Set(c)
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			designatev1beta1.DesignateWorkerReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone && workerObsGen {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opWorker != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opWorker)))
 	}
 	Log.Info("Deployment Worker task reconciled")
 
 	// deploy designate-mdns
-	designateMdns, op, err := r.mdnsStatefulSetCreateOrUpdate(ctx, instance)
+	designateMdns, opMdns, err := r.mdnsStatefulSetCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateMdnsReadyCondition,
@@ -1383,38 +1410,26 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			err.Error()))
 		return ctrl.Result{}, err
 	}
-	mdnsObsGen, err := r.checkDesignateMdnsGeneration(instance)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			designatev1beta1.DesignateMdnsReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			designatev1beta1.DesignateMdnsReadyErrorMessage,
-			err.Error()))
-		return ctrlResult, nil
-	}
-	if !mdnsObsGen {
-		instance.Status.Conditions.Set(condition.UnknownCondition(
-			designatev1beta1.DesignateMdnsReadyCondition,
-			condition.InitReason,
-			designatev1beta1.DesignateMdnsReadyInitMessage,
-		))
-	} else {
-		// Mirror DesignateMdns status' ReadyCount to this parent CR
+	if designateMdns.Generation == designateMdns.Status.ObservedGeneration {
 		instance.Status.DesignateMdnsReadyCount = designateMdns.Status.ReadyCount
-		// Mirror DesignateMdns's condition status
 		c := designateMdns.Status.Conditions.Mirror(designatev1beta1.DesignateMdnsReadyCondition)
 		if c != nil {
 			instance.Status.Conditions.Set(c)
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			designatev1beta1.DesignateMdnsReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone && mdnsObsGen {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opMdns != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opMdns)))
 	}
 	Log.Info("Deployment Mdns task reconciled")
 
 	// deploy designate-producer
-	designateProducer, op, err := r.producerDeploymentCreateOrUpdate(ctx, instance)
+	designateProducer, opProducer, err := r.producerDeploymentCreateOrUpdate(ctx, instance, transportURL.Status.SecretName)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateProducerReadyCondition,
@@ -1424,38 +1439,26 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			err.Error()))
 		return ctrl.Result{}, err
 	}
-	prodObsGen, err := r.checkDesignateProducerGeneration(instance)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			designatev1beta1.DesignateProducerReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			designatev1beta1.DesignateProducerReadyErrorMessage,
-			err.Error()))
-		return ctrlResult, nil
-	}
-	if !prodObsGen {
-		instance.Status.Conditions.Set(condition.UnknownCondition(
-			designatev1beta1.DesignateProducerReadyCondition,
-			condition.InitReason,
-			designatev1beta1.DesignateProducerReadyInitMessage,
-		))
-	} else {
-		// Mirror DesignateProducer status' ReadyCount to this parent CR
+	if designateProducer.Generation == designateProducer.Status.ObservedGeneration {
 		instance.Status.DesignateProducerReadyCount = designateProducer.Status.ReadyCount
-		// Mirror DesignateProducer's condition status
 		c := designateProducer.Status.Conditions.Mirror(designatev1beta1.DesignateProducerReadyCondition)
 		if c != nil {
 			instance.Status.Conditions.Set(c)
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			designatev1beta1.DesignateProducerReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone && prodObsGen {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opProducer != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opProducer)))
 	}
 	Log.Info("Deployment Producer task reconciled")
 
 	// deploy designate-backendbind9
-	designateBackendbind9, op, err := r.backendbind9StatefulSetCreateOrUpdate(ctx, instance)
+	designateBackendbind9, opBind9, err := r.backendbind9StatefulSetCreateOrUpdate(ctx, instance)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateBackendbind9ReadyCondition,
@@ -1465,38 +1468,26 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			err.Error()))
 		return ctrl.Result{}, err
 	}
-	bindObsGen, err := r.checkDesignateBindGeneration(instance)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			designatev1beta1.DesignateBackendbind9ReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			designatev1beta1.DesignateBackendbind9ReadyErrorMessage,
-			err.Error()))
-		return ctrlResult, nil
-	}
-	if !bindObsGen {
-		instance.Status.Conditions.Set(condition.UnknownCondition(
-			designatev1beta1.DesignateBackendbind9ReadyCondition,
-			condition.InitReason,
-			designatev1beta1.DesignateBackendbind9ReadyInitMessage,
-		))
-	} else {
-		// Mirror DesignateBackendbind9 status' ReadyCount to this parent CR
+	if designateBackendbind9.Generation == designateBackendbind9.Status.ObservedGeneration {
 		instance.Status.DesignateBackendbind9ReadyCount = designateBackendbind9.Status.ReadyCount
-		// Mirror DesignateBackendbind9's condition status
 		c := designateBackendbind9.Status.Conditions.Mirror(designatev1beta1.DesignateBackendbind9ReadyCondition)
 		if c != nil {
 			instance.Status.Conditions.Set(c)
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			designatev1beta1.DesignateBackendbind9ReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone && bindObsGen {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opBind9 != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opBind9)))
 	}
 	Log.Info("Deployment Backendbind9 task reconciled")
 
 	// deploy the unbound reconcilier if necessary
-	designateUnbound, op, err := r.unboundStatefulSetCreateOrUpdate(ctx, instance)
+	designateUnbound, opUnbound, err := r.unboundStatefulSetCreateOrUpdate(ctx, instance)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
 			designatev1beta1.DesignateUnboundReadyCondition,
@@ -1506,32 +1497,21 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 			err.Error()))
 		return ctrl.Result{}, err
 	}
-	unbObsGen, err := r.checkDesignateUnboundGeneration(instance)
-	if err != nil {
-		instance.Status.Conditions.Set(condition.FalseCondition(
-			designatev1beta1.DesignateUnboundReadyCondition,
-			condition.ErrorReason,
-			condition.SeverityWarning,
-			designatev1beta1.DesignateUnboundReadyErrorMessage,
-			err.Error()))
-		return ctrlResult, nil
-	}
-	if !unbObsGen {
-		instance.Status.Conditions.Set(condition.UnknownCondition(
-			designatev1beta1.DesignateUnboundReadyCondition,
-			condition.InitReason,
-			designatev1beta1.DesignateUnboundReadyInitMessage,
-		))
-	} else {
+	if designateUnbound.Generation == designateUnbound.Status.ObservedGeneration {
 		instance.Status.DesignateUnboundReadyCount = designateUnbound.Status.ReadyCount
-		// Mirror DesignateProducer's condition status
 		c := designateUnbound.Status.Conditions.Mirror(designatev1beta1.DesignateUnboundReadyCondition)
 		if c != nil {
 			instance.Status.Conditions.Set(c)
 		}
+	} else {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			designatev1beta1.DesignateUnboundReadyCondition,
+			condition.RequestedReason,
+			condition.SeverityInfo,
+			condition.DeploymentReadyRunningMessage))
 	}
-	if op != controllerutil.OperationResultNone && unbObsGen {
-		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(op)))
+	if opUnbound != controllerutil.OperationResultNone {
+		Log.Info(fmt.Sprintf("Deployment %s successfully reconciled - operation: %s", instance.Name, string(opUnbound)))
 	}
 	Log.Info("Deployment Unbound task reconciled")
 
@@ -1541,12 +1521,89 @@ func (r *DesignateReconciler) reconcileNormal(ctx context.Context, instance *des
 		return ctrl.Result{}, err
 	}
 
+	// Rotation grace period: when a rotation starts, set a timestamp
+	// annotation and wait before evaluating the guard. This gives sub-CRs
+	// time to detect the config secret change, update their Deployments,
+	// and roll pods — without relying on informer cache freshness.
+	const (
+		rotationGraceAnnotation = "openstack.org/rotation-grace-until"
+		rotationGracePeriod     = 30 * time.Second
+	)
+
+	rotationPending := instance.Status.TransportURLSecret != "" &&
+		instance.Status.TransportURLSecret != transportURL.Status.SecretName
+
+	if rotationPending {
+		graceUntilStr := instance.Annotations[rotationGraceAnnotation]
+		if graceUntilStr == "" {
+			// First reconcile seeing the rotation — set the grace period
+			graceUntil := time.Now().Add(rotationGracePeriod)
+			if instance.Annotations == nil {
+				instance.Annotations = map[string]string{}
+			}
+			instance.Annotations[rotationGraceAnnotation] = graceUntil.Format(time.RFC3339)
+			if err := r.Client.Update(ctx, instance); err != nil {
+				return ctrl.Result{}, err
+			}
+			Log.Info("Rotation grace period started", "until", graceUntil.Format(time.RFC3339))
+			return ctrl.Result{RequeueAfter: rotationGracePeriod}, nil
+		}
+
+		graceUntil, err := time.Parse(time.RFC3339, graceUntilStr)
+		if err == nil && time.Now().Before(graceUntil) {
+			remaining := time.Until(graceUntil)
+			Log.Info("Rotation grace period active", "remaining", remaining)
+			return ctrl.Result{RequeueAfter: remaining}, nil
+		}
+	}
+
+	guardReady := condition.CredentialRotationGuardReady(
+		true, &instance.Status.Conditions)
+
 	// We reached the end of the Reconcile, update the Ready condition based on
 	// the sub conditions
 	if instance.Status.Conditions.AllSubConditionIsTrue() {
 		instance.Status.Conditions.MarkTrue(
 			condition.ReadyCondition, condition.ReadyMessage)
 	}
+
+	// Finalize transport URL rotation
+	transportSecretName, err := object.FinalizeSecretRotation(
+		ctx, helper, instance.Namespace,
+		instance.Status.TransportURLSecret,
+		transportURL.Status.SecretName,
+		designate.TransportConsumerFinalizer,
+		guardReady,
+	)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	instance.Status.TransportURLSecret = transportSecretName
+
+	if notificationsTransportURL != nil {
+		notifSecretName, err := object.FinalizeSecretRotation(
+			ctx, helper, instance.Namespace,
+			instance.Status.NotificationsTransportURLSecret,
+			notificationsTransportURL.Status.SecretName,
+			designate.TransportConsumerFinalizer,
+			guardReady,
+		)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		instance.Status.NotificationsTransportURLSecret = notifSecretName
+	}
+
+	// Clear the grace period annotation after rotation completes
+	if _, hasGrace := instance.Annotations[rotationGraceAnnotation]; hasGrace {
+		if !rotationPending {
+			delete(instance.Annotations, rotationGraceAnnotation)
+			if err := r.Client.Update(ctx, instance); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
 	Log.Info("Reconciled Service successfully")
 	return ctrl.Result{}, nil
 }
@@ -2037,7 +2094,7 @@ func copyDesignateTemplateItems(src *designatev1beta1.DesignateSpecBase, dest *d
 	dest.PasswordSelectors.Service = getOrDefault(src.PasswordSelectors.Service, "DesignatePassword")
 }
 
-func (r *DesignateReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate) (*designatev1beta1.DesignateAPI, controllerutil.OperationResult, error) {
+func (r *DesignateReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate, transportURLSecretName string) (*designatev1beta1.DesignateAPI, controllerutil.OperationResult, error) {
 	deployment := &designatev1beta1.DesignateAPI{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-api", instance.Name),
@@ -2063,7 +2120,7 @@ func (r *DesignateReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, i
 		deployment.Spec.DatabaseHostname = instance.Status.DatabaseHostname
 		deployment.Spec.ServiceAccount = instance.RbacResourceName()
 		deployment.Spec.TLS = instance.Spec.DesignateAPI.TLS
-		deployment.Spec.TransportURLSecret = instance.Status.TransportURLSecret
+		deployment.Spec.TransportURLSecret = transportURLSecretName
 		deployment.Spec.NodeSelector = instance.Spec.DesignateAPI.NodeSelector
 		deployment.Spec.TopologyRef = instance.Spec.DesignateAPI.TopologyRef
 		deployment.Spec.APITimeout = instance.Spec.APITimeout
@@ -2079,7 +2136,7 @@ func (r *DesignateReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, i
 	return deployment, op, err
 }
 
-func (r *DesignateReconciler) centralDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate) (*designatev1beta1.DesignateCentral, controllerutil.OperationResult, error) {
+func (r *DesignateReconciler) centralDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate, transportURLSecretName string) (*designatev1beta1.DesignateCentral, controllerutil.OperationResult, error) {
 	deployment := &designatev1beta1.DesignateCentral{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-central", instance.Name),
@@ -2103,7 +2160,7 @@ func (r *DesignateReconciler) centralDeploymentCreateOrUpdate(ctx context.Contex
 		// TODO: Add logic to determine when to set/overwrite, etc
 		copyDesignateTemplateItems(&instance.Spec.DesignateSpecBase, &deployment.Spec.DesignateTemplate)
 		deployment.Spec.DatabaseHostname = instance.Status.DatabaseHostname
-		deployment.Spec.TransportURLSecret = instance.Status.TransportURLSecret
+		deployment.Spec.TransportURLSecret = transportURLSecretName
 		deployment.Spec.ServiceAccount = instance.RbacResourceName()
 		deployment.Spec.TLS = instance.Spec.DesignateAPI.TLS.Ca
 		deployment.Spec.NodeSelector = instance.Spec.DesignateCentral.NodeSelector
@@ -2120,7 +2177,7 @@ func (r *DesignateReconciler) centralDeploymentCreateOrUpdate(ctx context.Contex
 	return deployment, op, err
 }
 
-func (r *DesignateReconciler) workerDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate) (*designatev1beta1.DesignateWorker, controllerutil.OperationResult, error) {
+func (r *DesignateReconciler) workerDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate, transportURLSecretName string) (*designatev1beta1.DesignateWorker, controllerutil.OperationResult, error) {
 	deployment := &designatev1beta1.DesignateWorker{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-worker", instance.Name),
@@ -2144,7 +2201,7 @@ func (r *DesignateReconciler) workerDeploymentCreateOrUpdate(ctx context.Context
 		// TODO: Add logic to determine when to set/overwrite, etc
 		copyDesignateTemplateItems(&instance.Spec.DesignateSpecBase, &deployment.Spec.DesignateTemplate)
 		deployment.Spec.DatabaseHostname = instance.Status.DatabaseHostname
-		deployment.Spec.TransportURLSecret = instance.Status.TransportURLSecret
+		deployment.Spec.TransportURLSecret = transportURLSecretName
 		deployment.Spec.ServiceAccount = instance.RbacResourceName()
 		deployment.Spec.TLS = instance.Spec.DesignateAPI.TLS.Ca
 		deployment.Spec.NodeSelector = instance.Spec.DesignateWorker.NodeSelector
@@ -2161,7 +2218,7 @@ func (r *DesignateReconciler) workerDeploymentCreateOrUpdate(ctx context.Context
 	return deployment, op, err
 }
 
-func (r *DesignateReconciler) mdnsStatefulSetCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate) (*designatev1beta1.DesignateMdns, controllerutil.OperationResult, error) {
+func (r *DesignateReconciler) mdnsStatefulSetCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate, transportURLSecretName string) (*designatev1beta1.DesignateMdns, controllerutil.OperationResult, error) {
 	statefulSet := &designatev1beta1.DesignateMdns{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-mdns", instance.Name),
@@ -2200,7 +2257,6 @@ func (r *DesignateReconciler) mdnsStatefulSetCreateOrUpdate(ctx context.Context,
 		statefulSet.Spec.NodeSelector = instance.Spec.DesignateMdns.NodeSelector
 		statefulSet.Spec.TopologyRef = instance.Spec.DesignateMdns.TopologyRef
 		statefulSet.Spec.ControlNetworkName = instance.Spec.DesignateMdns.ControlNetworkName
-
 		err := controllerutil.SetControllerReference(instance, statefulSet, r.Scheme)
 		if err != nil {
 			return err
@@ -2212,7 +2268,7 @@ func (r *DesignateReconciler) mdnsStatefulSetCreateOrUpdate(ctx context.Context,
 	return statefulSet, op, err
 }
 
-func (r *DesignateReconciler) producerDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate) (*designatev1beta1.DesignateProducer, controllerutil.OperationResult, error) {
+func (r *DesignateReconciler) producerDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate, transportURLSecretName string) (*designatev1beta1.DesignateProducer, controllerutil.OperationResult, error) {
 	deployment := &designatev1beta1.DesignateProducer{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-producer", instance.Name),
@@ -2236,7 +2292,7 @@ func (r *DesignateReconciler) producerDeploymentCreateOrUpdate(ctx context.Conte
 		// TODO: Add logic to determine when to set/overwrite, etc
 		copyDesignateTemplateItems(&instance.Spec.DesignateSpecBase, &deployment.Spec.DesignateTemplate)
 		deployment.Spec.DatabaseHostname = instance.Status.DatabaseHostname
-		deployment.Spec.TransportURLSecret = instance.Status.TransportURLSecret
+		deployment.Spec.TransportURLSecret = transportURLSecretName
 		deployment.Spec.ServiceAccount = instance.RbacResourceName()
 		deployment.Spec.TLS = instance.Spec.DesignateAPI.TLS.Ca
 		deployment.Spec.NodeSelector = instance.Spec.DesignateProducer.NodeSelector

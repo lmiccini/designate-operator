@@ -567,6 +567,8 @@ func (r *DesignateWorkerReconciler) reconcileNormal(ctx context.Context, instanc
 	// create hash over all the different input resources to identify if any those changed
 	// and a restart/recreate is required.
 	//
+
+
 	inputHash, hashChanged, err := r.createHashOfInputHashes(ctx, helper, instance, configMapVars)
 	if err != nil {
 		instance.Status.Conditions.Set(condition.FalseCondition(
