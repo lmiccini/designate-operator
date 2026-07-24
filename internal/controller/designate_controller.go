@@ -1985,6 +1985,12 @@ func (r *DesignateReconciler) generateServiceConfigMaps(
 	}
 	templateParameters["CoordinationBackendURL"] = redis.GetRedisClientURL()
 
+	if redis.GetRedisMTLSSecret() != "" {
+		templateParameters["RedisMTLSCert"] = "/var/lib/config-data/mtls/certs/mtls.crt"
+		templateParameters["RedisMTLSKey"] = "/var/lib/config-data/mtls/private/mtls.key"
+		templateParameters["RedisMTLSCa"] = "/var/lib/config-data/mtls/certs/mtls-ca.crt"
+	}
+
 	cms := []util.Template{
 		// ScriptsConfigMap
 		{
@@ -2149,6 +2155,21 @@ func copyDesignateTemplateItems(src *designatev1beta1.DesignateSpecBase, dest *d
 	dest.DatabaseAccount = getOrDefault(src.DatabaseAccount, "designate")
 	dest.Secret = src.Secret
 	dest.PasswordSelectors.Service = getOrDefault(src.PasswordSelectors.Service, "DesignatePassword")
+}
+
+// getRedisForService fetches the Redis CR used by the parent Designate that
+// owns the given sub-service instance (Central, API, Worker, Mdns, Producer).
+func getRedisForService(ctx context.Context, h *helper.Helper, instance client.Object, namespace string) (*redisv1.Redis, error) {
+	parentName := designate.GetOwningDesignateName(instance)
+	if parentName == "" {
+		return nil, fmt.Errorf("failed to get owning Designate for %s", instance.GetName())
+	}
+	parent := &designatev1beta1.Designate{}
+	err := h.GetClient().Get(ctx, types.NamespacedName{Name: parentName, Namespace: namespace}, parent)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parent Designate %s: %w", parentName, err)
+	}
+	return redisv1.GetRedisByName(ctx, h, parent.Spec.RedisServiceName, namespace)
 }
 
 func (r *DesignateReconciler) apiDeploymentCreateOrUpdate(ctx context.Context, instance *designatev1beta1.Designate) (*designatev1beta1.DesignateAPI, controllerutil.OperationResult, error) {

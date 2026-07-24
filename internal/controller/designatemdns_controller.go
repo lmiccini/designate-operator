@@ -696,8 +696,19 @@ func (r *DesignateMdnsReconciler) reconcileNormal(ctx context.Context, instance 
 	// normal reconcile tasks
 	//
 
+	redis, err := getRedisForService(ctx, helper, instance, instance.Namespace)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.DeploymentReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+
 	// Define a new Mdns StatefulSet object
-	statefulSetDef := designatemdns.StatefulSet(instance, inputHash, serviceLabels, serviceAnnotations, topology)
+	statefulSetDef := designatemdns.StatefulSet(instance, inputHash, serviceLabels, serviceAnnotations, topology, redis)
 	statefulSet := statefulset.NewStatefulSet(
 		statefulSetDef,
 		time.Duration(5)*time.Second,

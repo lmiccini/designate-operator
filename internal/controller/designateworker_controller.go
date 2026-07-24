@@ -676,8 +676,19 @@ func (r *DesignateWorkerReconciler) reconcileNormal(ctx context.Context, instanc
 	// normal reconcile tasks
 	//
 
+	redis, err := getRedisForService(ctx, helper, instance, instance.Namespace)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.DeploymentReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+
 	// Define a new Deployment object
-	deplDef := designateworker.Deployment(instance, inputHash, serviceLabels, serviceAnnotations, topology)
+	deplDef := designateworker.Deployment(instance, inputHash, serviceLabels, serviceAnnotations, topology, redis)
 	depl := deployment.NewDeployment(
 		deplDef,
 		time.Duration(5)*time.Second,

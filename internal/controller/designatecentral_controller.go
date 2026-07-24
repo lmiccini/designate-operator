@@ -586,8 +586,20 @@ func (r *DesignateCentralReconciler) reconcileNormal(ctx context.Context, instan
 	}
 
 	serviceAnnotations := map[string]string{}
+
+	redis, err := getRedisForService(ctx, helper, instance, instance.Namespace)
+	if err != nil {
+		instance.Status.Conditions.Set(condition.FalseCondition(
+			condition.DeploymentReadyCondition,
+			condition.ErrorReason,
+			condition.SeverityWarning,
+			condition.DeploymentReadyErrorMessage,
+			err.Error()))
+		return ctrl.Result{}, err
+	}
+
 	// Define a new Deployment object
-	deplDef := designatecentral.Deployment(instance, inputHash, serviceLabels, serviceAnnotations, topology)
+	deplDef := designatecentral.Deployment(instance, inputHash, serviceLabels, serviceAnnotations, topology, redis)
 	depl := deployment.NewDeployment(
 		deplDef,
 		time.Duration(5)*time.Second,

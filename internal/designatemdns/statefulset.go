@@ -18,6 +18,7 @@ package designatemdns
 import (
 	designatev1beta1 "github.com/openstack-k8s-operators/designate-operator/api/v1beta1"
 	designate "github.com/openstack-k8s-operators/designate-operator/internal/designate"
+	redisv1 "github.com/openstack-k8s-operators/infra-operator/apis/redis/v1beta1"
 	topologyv1 "github.com/openstack-k8s-operators/infra-operator/apis/topology/v1beta1"
 	common "github.com/openstack-k8s-operators/lib-common/modules/common"
 	"github.com/openstack-k8s-operators/lib-common/modules/common/affinity"
@@ -35,6 +36,7 @@ func StatefulSet(
 	labels map[string]string,
 	annotations map[string]string,
 	topology *topologyv1.Topology,
+	redis *redisv1.Redis,
 ) *appsv1.StatefulSet {
 	rootUser := int64(0)
 	serviceName := instance.Name
@@ -92,6 +94,11 @@ func StatefulSet(
 	if instance.Spec.TLS.CaBundleSecretName != "" {
 		volumes = append(volumes, instance.Spec.TLS.CreateVolume())
 		volumeMounts = append(volumeMounts, instance.Spec.TLS.CreateVolumeMounts(nil)...)
+	}
+
+	if redis != nil && redis.GetRedisMTLSSecret() != "" {
+		volumes = append(volumes, redis.CreateMTLSVolume())
+		volumeMounts = append(volumeMounts, redis.CreateMTLSVolumeMounts()...)
 	}
 
 	statefulSet := &appsv1.StatefulSet{
