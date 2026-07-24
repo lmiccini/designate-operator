@@ -108,6 +108,8 @@ github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/leodido/go-urn v1.4.0 h1:WT9HwE9SGECu3lg4d/dIA+jxlljEa1/ffXKmRjqdmIQ=
 github.com/leodido/go-urn v1.4.0/go.mod h1:bvxc+MVxLKB4z00jd1z+Dvzr47oO32F/QSNjSBOlFxI=
+github.com/lmiccini/infra-operator/apis v0.0.0-20260724070814-d2e8d92bb55f h1:/HTk3lZ2fSPepkaVXgL9rvPBkZVciQPQO50EvpzVM4Q=
+github.com/lmiccini/infra-operator/apis v0.0.0-20260724070814-d2e8d92bb55f/go.mod h1:1w5ZG9RCR3JQumJnLg/gAMdKOgV0O0He0ZxJuj65KN4=
 github.com/mailru/easyjson v0.9.0 h1:PrnmzHw7262yW8sTBwxi1PdJA3Iw/EKBa8psRf7d9a4=
 github.com/mailru/easyjson v0.9.0/go.mod h1:1+xMtQp2MRNVL/V1bOzuP3aP8VNwRW55fQUto+XFtTU=
 github.com/maruel/natural v1.1.1 h1:Hja7XhhmvEFhcByqDoHz9QZbkWey+COd9xWfCfn1ioo=
@@ -128,8 +130,6 @@ github.com/onsi/gomega v1.42.1 h1:iN1rCUX+44NZ1Dc97MPoeFYbFR0vh8zxoxMFwKdyZ6I=
 github.com/onsi/gomega v1.42.1/go.mod h1:REff/hsDsodHoKlWsP2mAPhu1+5/6hVYNf9rIEBpeSg=
 github.com/openshift/api v0.0.0-20260710141509-36dec0bfafe4 h1:YVY7Mb0AdJBbNgC/Zz9R/ZwhixOmZNA8P+6ZPaDW/0M=
 github.com/openshift/api v0.0.0-20260710141509-36dec0bfafe4/go.mod h1:SPLf21TYPipzCO67BURkCfK6dcIIxx0oNRVWaOyRcXM=
-github.com/openstack-k8s-operators/infra-operator/apis v0.6.1-0.20260717091754-2c13031ef562 h1:JguaHRJrT4JUnv79WzHv30L7kSRLqUze3tE4UeoYgI0=
-github.com/openstack-k8s-operators/infra-operator/apis v0.6.1-0.20260717091754-2c13031ef562/go.mod h1:Vt3mdIVN9loJO0mwTSAQ4HmLzTH4M+7/eUhxdKGr8Mo=
 github.com/openstack-k8s-operators/keystone-operator/api v0.6.1-0.20260717082957-bb1267fa59f8 h1:6w/5oii49j9XdB1ZOqCbRrW6MuUF9smCc97V3vJ1dQ0=
 github.com/openstack-k8s-operators/keystone-operator/api v0.6.1-0.20260717082957-bb1267fa59f8/go.mod h1:lbMu1OcjLOfwSzHFTGztFCX2KKmyFsPJVAjE0niEASg=
 github.com/openstack-k8s-operators/lib-common/modules/common v0.6.1-0.20260717092345-ab1ee7b97c67 h1:crgFl4DA5n38huc043ux21jEQM7UaRMXsi+wogDOYn0=
