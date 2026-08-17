@@ -1392,8 +1392,8 @@ var _ = Describe("Designate controller", func() {
 					Name:      expectedTopology.Name,
 					Namespace: expectedTopology.Namespace,
 				})
-				// API, Central, Producer, Worker, Mdns + Unbound = 6 finalizers
-				g.Expect(tp.GetFinalizers()).To(HaveLen(6))
+				// API, Central, Producer, Worker, Mdns, Unbound, Backendbind9 = 7 finalizers
+				g.Expect(tp.GetFinalizers()).To(HaveLen(7))
 				finalizers := tp.GetFinalizers()
 
 				designateAPI := GetDesignateAPI(designateAPIName)
@@ -1909,6 +1909,209 @@ var _ = Describe("Designate controller", func() {
 				g.Expect(conf).Should(ContainSubstring("driver=messagingv2"))
 				g.Expect(conf).ShouldNot(MatchRegexp(`(?s)\[oslo_messaging_notifications\].*?transport_url=`))
 			}, timeout, interval).Should(Succeed())
+		})
+	})
+
+	When("TransportURL consumer finalizer is managed", func() {
+		BeforeEach(func() {
+			createAndSimulateKeystone(designateName)
+			createAndSimulateRedis(designateRedisName)
+			createAndSimulateDesignateSecrets(designateName)
+			createAndSimulateTransportURL(transportURLName, transportURLSecretName)
+			createAndSimulateDB(spec)
+			DeferCleanup(k8sClient.Delete, ctx, CreateNAD(types.NamespacedName{
+				Name:      spec["designateNetworkAttachment"].(string),
+				Namespace: namespace,
+			}))
+			DeferCleanup(th.DeleteInstance, CreateDesignate(designateName, spec))
+			th.SimulateJobSuccess(designateDBSyncName)
+		})
+
+		It("should add the consumer finalizer to the transport secret", func() {
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		It("should remove the consumer finalizer from transport secret on CR deletion", func() {
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			th.DeleteInstance(GetDesignate(designateName))
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).NotTo(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+		})
+
+		nadIPs := map[string][]string{
+			namespace + "/designate": {"172.28.0.50"},
+		}
+
+		simulateDesignateReady := func() {
+			keystone.SimulateKeystoneServiceReady(types.NamespacedName{
+				Namespace: namespace, Name: "designate"})
+			keystone.SimulateKeystoneEndpointReady(types.NamespacedName{
+				Namespace: namespace, Name: "designate"})
+			th.SimulateDeploymentReadyWithPods(types.NamespacedName{
+				Namespace: namespace, Name: "designate-api"}, nadIPs)
+			for _, suffix := range []string{"-central", "-worker", "-producer"} {
+				th.SimulateDeploymentReadyWithPods(types.NamespacedName{
+					Namespace: namespace, Name: designateName.Name + suffix}, nadIPs)
+			}
+			for _, suffix := range []string{"-mdns", "-unbound"} {
+				th.SimulateStatefulSetReplicaReadyWithPods(types.NamespacedName{
+					Namespace: namespace, Name: designateName.Name + suffix}, nadIPs)
+			}
+			bind9SSName := types.NamespacedName{
+				Namespace: namespace, Name: designateName.Name + "-backendbind9"}
+			bind9SS := &appsv1.StatefulSet{}
+			if k8sClient.Get(ctx, bind9SSName, bind9SS) == nil {
+				th.SimulateStatefulSetReplicaReadyWithPods(bind9SSName, nadIPs)
+			}
+		}
+
+		It("should move the finalizer from the old to the new secret on transport rotation", func() {
+			oldSecretName := transportURLSecretName.Name
+			newSecretName := "rabbitmq-secret-rotated"
+
+			// Step 1: Get Designate to Ready
+			Eventually(func(g Gomega) {
+				simulateDesignateReady()
+				d := GetDesignate(designateName)
+				g.Expect(d.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+				g.Expect(d.Status.TransportURLSecret).To(Equal(oldSecretName))
+			}, 3*timeout, interval).Should(Succeed())
+
+			// Step 2: Rotate transport URL
+			newSecret := th.CreateSecret(
+				types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				},
+				map[string][]byte{
+					"transport_url": []byte("rabbit://rotated-user:rotated-pass@rabbitmq/fake"),
+				},
+			)
+			DeferCleanup(k8sClient.Delete, ctx, newSecret)
+
+			Eventually(func(g Gomega) {
+				transport := infra.GetTransportURL(transportURLName)
+				transport.Status.SecretName = newSecretName
+				g.Expect(k8sClient.Status().Update(ctx, transport)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			// Step 3: Verify finalizer on new secret
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				})
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Step 4: Simulate ready after rotation
+			Eventually(func(g Gomega) {
+				simulateDesignateReady()
+				d := GetDesignate(designateName)
+				g.Expect(d.Status.Conditions.IsTrue(condition.ReadyCondition)).To(BeTrue())
+			}, 3*timeout, interval).Should(Succeed())
+
+			// Step 6: Verify finalizer removed from old secret
+			Eventually(func(g Gomega) {
+				simulateDesignateReady()
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      oldSecretName,
+				})
+				g.Expect(secret.Finalizers).NotTo(
+					ContainElement(designate.TransportConsumerFinalizer))
+				d := GetDesignate(designateName)
+				g.Expect(d.Status.TransportURLSecret).To(Equal(newSecretName))
+			}, 3*timeout, interval).Should(Succeed())
+		})
+
+		It("should hold the finalizer until the last sub-CR is ready", func() {
+			newSecretName := "rabbitmq-secret-rotated"
+
+			simulateDesignateReadyExceptUnbound := func() {
+				keystone.SimulateKeystoneServiceReady(types.NamespacedName{
+					Namespace: namespace, Name: "designate"})
+				keystone.SimulateKeystoneEndpointReady(types.NamespacedName{
+					Namespace: namespace, Name: "designate"})
+				th.SimulateDeploymentReadyWithPods(types.NamespacedName{
+					Namespace: namespace, Name: "designate-api"}, nadIPs)
+				for _, suffix := range []string{"-central", "-worker", "-producer"} {
+					th.SimulateDeploymentReadyWithPods(types.NamespacedName{
+						Namespace: namespace, Name: designateName.Name + suffix}, nadIPs)
+				}
+				th.SimulateStatefulSetReplicaReadyWithPods(types.NamespacedName{
+					Namespace: namespace, Name: designateName.Name + "-mdns"}, nadIPs)
+				// Skip unbound intentionally
+				bind9SSName := types.NamespacedName{
+					Namespace: namespace, Name: designateName.Name + "-backendbind9"}
+				bind9SS := &appsv1.StatefulSet{}
+				if k8sClient.Get(ctx, bind9SSName, bind9SS) == nil {
+					th.SimulateStatefulSetReplicaReadyWithPods(bind9SSName, nadIPs)
+				}
+			}
+
+			// Rotate transport URL
+			newSecret := th.CreateSecret(
+				types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				},
+				map[string][]byte{
+					"transport_url": []byte("rabbit://rotated-user:rotated-pass@rabbitmq/fake"),
+				},
+			)
+			DeferCleanup(k8sClient.Delete, ctx, newSecret)
+
+			Eventually(func(g Gomega) {
+				transport := infra.GetTransportURL(transportURLName)
+				transport.Status.SecretName = newSecretName
+				g.Expect(k8sClient.Status().Update(ctx, transport)).To(Succeed())
+			}, timeout, interval).Should(Succeed())
+
+			Eventually(func(g Gomega) {
+				secret := th.GetSecret(types.NamespacedName{
+					Namespace: namespace,
+					Name:      newSecretName,
+				})
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Simulate everything ready except unbound
+			Eventually(func(_ Gomega) {
+				simulateDesignateReadyExceptUnbound()
+			}, 3*timeout, interval).Should(Succeed())
+
+			// Finalizer should still be held (unbound not ready,
+			// so AllSubConditionIsTrue is false)
+			Consistently(func(g Gomega) {
+				simulateDesignateReadyExceptUnbound()
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).To(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, timeout, interval).Should(Succeed())
+
+			// Now simulate ALL sub-CRs ready including unbound
+			Eventually(func(g Gomega) {
+				simulateDesignateReady()
+				secret := th.GetSecret(transportURLSecretName)
+				g.Expect(secret.Finalizers).NotTo(
+					ContainElement(designate.TransportConsumerFinalizer))
+			}, 3*timeout, interval).Should(Succeed())
 		})
 	})
 })
